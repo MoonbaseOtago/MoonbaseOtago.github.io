@@ -24,20 +24,21 @@
 					<p>paul@taniwha.com @moonbaseotago</p>
 					<img width="300" src="assets/moonbase.png"><br>
 					<small>
-						<p>(C) Copyright Moonbase Otago 2021)</p>
+						<p>(C) Copyright Moonbase Otago 2021</p>
 					</small>
 				</section>
 				<section>
 					<h2>Executive summary</h2>
 					<small>
 					<ul>
-						<li>Very high end RISC-V implementation – cloud server class</li>
+						<li>Goal: Very high end RISC-V implementation – cloud server class</li>
 						<li>Out of order, super scalar, speculative</li>
 						<li>RV64-IMAFDCHB(V)</li>
-						<li>Up to 8 IPC (instructions per clock) peak  </li>
+						<li>Up to 8 IPC (instructions per clock) peak</li>
 						<li>2-way simultaneous multithreading capable</li>
 						<li>Multi-core</li>
 						<li>Currently boots Linux on an AWS-FPGA instance</li>
+						<li>Early (low) dhystone numbers: 1.67-2.05 DMips/MHz - still a work in progress</li>
 						<li>GPL3 – dual licensing possible</li>
 					</ul>
 					</small>
@@ -68,6 +69,19 @@
 					</ul>
 					</small>
 					<img width="500" src="assets/decode.svg">
+					</div>
+				</section>
+				<section>
+					<h2>Branch Target cache</h2>
+					<div align="left">
+					<small>
+					<ul>
+					<li>Separate BTCs for each access mode, user mode flushed on MMU table switch</li>
+					<li>32 entry call/return stack</li>
+					<li>Combined global history/bimodal branch predictors</li>
+					<li>Support for speculative branches/calls/returrns</li>
+					</ul>
+					</small>
 					</div>
 				</section>
 				<section>
@@ -334,9 +348,9 @@
 						<li>Written in Verilog, some parts auto-generated in C</li>
 						<li>Currently being tested on an AWS FPGA instance - boots linux</li>
 						<li>Xilinx VU9P Ultrascale (which is really 3 dies) </li>
-						<li>Cut down to fit: 2 load 1 store units, 2 ALUs, 1 MULT, 1 shifter, 32 entry commitQ, 8 entry storeQ 32k I$1, 32k D$1, no L2, small BTC max 56 instructions in flight</li>
+						<li>Cut down to fit: 2 load 1 store units, 2 ALUs, 1 Mul, 1 shifter, 32 entry commitQ, 8 entry storeQ, 32k I$1, 32k D$1, no L2, small BTC, max 56 instructions in flight</li>
 						<li>Uses our cache coherency fabric, AWS’s DRAM controller</li>
-						<li>Runs at 25MHz (for faster synthesis/routing times)</li>
+						<li>Runs at 25MHz (largely for faster synthesis/routing times)</li>
 						<li>Software support for serial and minimal hard drive, no networking yet</li>
 					<ul>
 					<img width="600" src="assets/chip.png">
@@ -352,7 +366,7 @@
 						<li>2 HARTS (multithreaded)
 						<li>CommitQ 64 entries</li>
 						<li>StoreQ 32 entries</li>
-						<li>I$0 64 entries of 8 instruction bundles</li>
+						<li>I$0 64+ entries of 8 instruction bundles</li>
 						<li>I$1 64kbtytes</li>
 						<li>D$1 64kbytes</li>
 						<li>Combined L2 2-4Mb</li>
@@ -436,6 +450,20 @@
 					</div>
 				</section>
 				<section>
+					<h2>Benchmarks</h2>
+					<div align="left">
+					<small>	
+					<p>As mentioned earlier up until now we've been running with the branch target cache broken on purpose so we can debug operation shootdown in the pipeline. Now (in the past few days) with linux booting we're starting by running dhrystone in linux user mode on the real hardware, and in machine mode on the simulator. The global history part of the BTC is still broken, but the bimodal predictor and return stack seem to be working. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
+					<table>
+					<tr><td>Source</td><td>Dhystone/sec</td><td>DMips</td><td>DMips/Mhz</td></tr>
+					<tr><td>Hardware</td><td>73766</td><td>41</td><td>1.67</td></tr>
+					<tr><td>Simulator</td><td>90093</td><td>51.2</td><td>2.05</td></tr>
+					</table>
+					<p>Looking at the current system performance we could gain a small amount little here with a 3rd ALU, but the big performance issue is still the BTC hit rate - the simulator shows that its larger BTC is definitely a plus.</p>
+					</small>
+					</div>
+				</section>
+				<section>
 					<h2>Trace cache</h2>
 					<small>
 					<p align="left">This is probably the most interesting enhancement we can do to the current system to up the issue rate in inner loops to a fixed 8 bundles/clock no matter what size the original instruction was</p>
@@ -468,6 +496,8 @@
 			// - https://revealjs.com/config/
 			Reveal.initialize({
 				hash: true,
+				
+
 
 				// Learn about plugins: https://revealjs.com/plugins/
 				plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
