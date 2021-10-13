@@ -13,10 +13,10 @@ html * {
 }
 
 /*********************************************
- * GLOBAL STYLES
+ * GLOBAL STYLES #fdf6e3
  *********************************************/
 :root {
-  --r-background-color: #fdf6e3;
+  --r-background-color: #faf9e3;
   --r-main-font: Lato, sans-serif;
   --r-main-font-size: 40px;
   --r-main-color: #657b83;
@@ -43,7 +43,7 @@ html * {
 }
 
 .reveal-viewport {
-  background: #fdf6e3;
+  background: #faf9e3;
   background-color: var(--r-background-color);
 }
 
