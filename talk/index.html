@@ -25,6 +25,7 @@
 					<img width="300" src="assets/moonbase.png"><br>
 					<small>
 						<p>(C) Copyright Moonbase Otago 2021</p>
+						<p>All rights reserved</p>
 					</small>
 				</section>
 				<section>
@@ -34,11 +35,11 @@
 						<li>Goal: Very high end RISC-V implementation – cloud server class</li>
 						<li>Out of order, super scalar, speculative</li>
 						<li>RV64-IMAFDCHB(V)</li>
-						<li>Up to 8 IPC (instructions per clock) peak</li>
+						<li>Up to 8 IPC (instructions per clock) peak, goal ~4 average on ALU heavy work</li>
 						<li>2-way simultaneous multithreading capable</li>
 						<li>Multi-core</li>
 						<li>Currently boots Linux on an AWS-FPGA instance</li>
-						<li>Early (low) dhystone numbers: 1.67-2.05 DMips/MHz - still a work in progress</li>
+						<li>Early (low) dhrystone numbers: ~2 DMips/MHz - still a work in progress. Goal ~4 with fully working BTC</li>
 						<li>GPL3 – dual licensing possible</li>
 					</ul>
 					</small>
@@ -52,6 +53,10 @@
 						<li>General long term goal is a high end server class CPU, 5GHz+, multithreaded, 100+ instructions in flight at any one time</li>
 					</ul>
 					</small>
+				</section>
+				<section>
+					<h2>Architerctural Overview</h2>
+					<img width="700" src="assets/overview.svg">
 				</section>
 				<section>
 					<h2>1-3 Fetch and decoder</h2>
@@ -79,7 +84,7 @@
 					<li>Separate BTCs for each access mode, user mode flushed on MMU table switch</li>
 					<li>32 entry call/return stack</li>
 					<li>Combined global history/bimodal branch predictors</li>
-					<li>Support for speculative branches/calls/returrns</li>
+					<li>Support for speculative branches/calls/returns</li>
 					</ul>
 					</small>
 					</div>
@@ -183,7 +188,7 @@
 						<li>1 shift</li>
 						<li>1 multiply/divide</li>
 						<li>&gt;=1 FP	[a work in progress]</li>
-						<li>1 branch [may be merged into arithmetic units]</li>
+						<li>1 or 2 branch [may be merged into arithmetic units]</li>
 						<li>1 CSR/TRAP/privileged </li>
 						<li>1 Load/Store (3 load/2 store per clock) [currently 2/1]</li>
 						<li>Each commitQ entry is tagged for one of these</li>
@@ -211,8 +216,8 @@
 					<h2>Schedulers</h2>
 					<small>
 					<ul>
-						<li>Each type of functional unit has a scheduler</li>
-						<li>Looks for instructions ready to execute (ie who’s source registers will have been calculated in the next clock)</li>
+						<li>Each type of functional unit has a scheduler, they are independant</li>
+						<li>It looks for instructions ready to execute (ie who’s source registers will have been calculated by the next clock)</li>
 						<li>Schedules the N instructions ready to run closest to the commit end of the commitQ</li>
 						<li>Load/Store scheduler wont re-order stores past stores, or loads past stores (but will reorder loads) – once scheduled (and virt-&gt;phys translation) further reordering can happen</li>
 					</ul>
@@ -245,7 +250,7 @@
 						<li>Can handle 3 concurrent loads and 2 concurrent stores</li>
 						<li>Loads can run in 1 clock if in cache (or snooped from storeQ) and in TLBs</li>
 						<li>Also 1 clock speculatively if in storeQ</li>
-						<li>Stores/Fences go in the storeQ, are executed in order, but only once their commitQ instructions are committed</li>
+						<li>Stores/Fences go in the storeQ, are executed in order, but only once their commitQ instructions are committed, they are abandoned if a speculative store is discarded</li>
 						<li>Loads go in storeQ if they miss in cache, are fenced, or blocked by a pending access to the same cache line</li>
 					</ul>
 					</small>
@@ -259,15 +264,19 @@
 
 					<h2>Virtual Memory</h2>
 					<small>
+					<div align="left">
 					<ul>
-						<li>Separate Instruction and Data 32 entry fully associative L1 TLBs</li>
+						<li>Separate instruction and data 32 entry fully associative L1 TLBs</li>
 
 						<li>Shared L2 TLB and table walker – 4 way associative 128+ entries</li>
 
 						<li>Small cache of page data (to avoid upper page table refetches, takes part in cache coherency protocol)</li>
 
 						<li>Table walker shares the instruction fetch port to the cache fabric (both are read only – I$1 cache coherency ports can have up to 8 concurrent transactions running at the same time)</li>	
+						<li>16-bit unified (between HARTs) address space ID, or 15-bit unique (per HART) one</li>
 					</ul>
+					<p>Note: 'HART' is a RISC-V term that referes to a unit of execution - for example one portion of a multithreaded core</p>
+					</div>
 					</small>
 				</section>
 				<section>
@@ -301,13 +310,13 @@
 					<h2>Performance</h2>
 					<div align="left">
 					<small>
-					<p> Still a work in progress. Observed in the current simulation:</p>
+					<p> Still a work in progress. Observed in the current implementation:</p>
 					<ul>
 						<li>Peak 8 instructions decoded per clock</li>
 						<li>Peak 8 committed per clock</li>
-						<li>5 clock branch misprediction penalty (often less or zero depending on what’s in the pipeline - mispredictions caught deep in the pipeline can be resolved at 0 cost)</li>
+						<li>5 clock branch misprediction penalty (often less or zero depending on what’s in the pipeline - mispredictions caught deep in the pipeline can be resolved at effectively 0 cost)</li>
 					</ul>
-					<p>Theoretical:</p>
+					<p>Theoretical (one HART):</p>
 					<ul>
 						<li>Max 88 instructions in flight (104 if you count pending stores)</li>
 						<li>(currently) 8 concurrent 512bit cache line fetches per L1 cache</li>
@@ -316,17 +325,28 @@
 					</div>
 				</section>
 				<section>
-
+					<h2>Benchmarks</h2>
+					<div align="left">
+					<small>	
+					<p>Up until now we've been running with the branch target cache broken on purpose so we can debug shootdown operations in the pipeline. Now (in the past few days) with linux booting we're starting to run dhrystone in linux user mode on the real hardware, and also in machine mode on the simulator. The global history part of the BTC is still broken, but the bimodal predictor and return stack seem to be working. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
+					<table>
+					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/Mhz</td></tr>
+					<tr><td>Hardware</td><td>73766</td><td>41</td><td>1.67</td></tr>
+					<tr><td>Simulator</td><td>90093</td><td>51.2</td><td>2.05</td></tr>
+					</table>
+					<p>Looking at the architectural traces we could gain a small amount little here with a 3rd ALU, but the big performance issue is still the BTC hit rate - the simulator shows that its larger BTC is definitely a plus.</p>
+					</small>
+					</div>
+				</section>
+				<section>
 					<h2>Putting it all together</h2>
 					<img width="600" valign="top" src="assets/cpu1.svg">
 				</section>
 				<section>
-
 					<h2>Multithreading</h2>
 					<img width="600" valign="top" src="assets/cpu2.svg">
 				</section>
 				<section>
-
 					<h2>A little further ...</h2>
 					<p>This is what we have working today (without the L2)</p>
 					<img width="600" valign="top" src="assets/sys1.svg">
@@ -337,7 +357,6 @@
 					<img width="600" valign="top" src="assets/sys3.svg">
 				</section>
 				<section>
-
 					<h2>Building Systems</h2>
 					<img width="600" valign="top" src="assets/sys2.svg">
 				</section>
@@ -345,17 +364,42 @@
 					<h2>Current System</h2>
 					<small>
 					<ul>
-						<li>Written in Verilog, some parts auto-generated in C</li>
+						<li>Written in Verilog, some parts auto-generated from C</li>
 						<li>Currently being tested on an AWS FPGA instance - boots linux</li>
 						<li>Xilinx VU9P Ultrascale (which is really 3 dies) </li>
-						<li>Cut down to fit: 2 load 1 store units, 2 ALUs, 1 Mul, 1 shifter, 32 entry commitQ, 8 entry storeQ, 32k I$1, 32k D$1, no L2, small BTC, max 56 instructions in flight</li>
+						<li>Cut down to fit: 2 load 1 store units, 2 ALUs, 1 mult, 1 shifter, 32 entry commitQ, 8 entry storeQ, 32k I$1, 32k D$1, no L2, small BTC, max 56 instructions in flight</li>
 						<li>Uses our cache coherency fabric, AWS’s DRAM controller</li>
 						<li>Runs at 25MHz (largely for faster synthesis/routing times)</li>
 						<li>Software support for serial and minimal hard drive, no networking yet</li>
 					<ul>
 					<img width="600" src="assets/chip.png">
 					</small>
-
+				</section>
+				<section>
+					<h2>AWS FPGA architecture</h2>
+					<small>
+					<img width="500" src="assets/vu9p.svg">
+					<p  align="left">The CPU is instantiated in a VU9P FPGA along with AWS's support logic (top 1/3 of the RHS two dies on the previous page). 
+					In our case we use the provided DRAM controller and PCIE interfaces to allow the host Linux CPU access to
+					a small extra UART, a 'fake' disk controller, and a reset controller.</p>
+					<p  align="left">On the host CPU a small user space program talks to registers in memory mapped
+					PCIE space to provide a console (through the UART) and access to a 'disk' image 
+					in a file. </p>
+					</small>
+				</section>
+				<section>
+					<h2>Where are we up to?</h2>
+					<small>
+					<ul>
+						<li>Still very much a work in progress</li>
+						<li>Most of the design is in place</li>
+						<li>PLIC/CLIC/CLNT</li>
+						<li>uart/faux disk/timers</li>
+						<li>Coherent caching fabric</li>
+						<li>Boots Linux on AWS FPGA instance</li>
+						<li>Coded for multithreading (very not tested) and multiple CPUs (again not tested) – like cache/btc/queue sizes these are simple build options</li>
+					</ul>
+					</small>
 				</section>
 				<section>
 					<h2>Eventual Goal</h2>
@@ -363,22 +407,22 @@
 					<p align="left">Much of the design is parameterized, we can change stuff easily, here’s a back of the envelope sketch of our goal:</p>	
 					<ul>
 						<li>1-5GHz (will likely involve adding ~2 pipe stages to the above description)</li>
-						<li>2 HARTS (multithreaded)
-						<li>CommitQ 64 entries</li>
-						<li>StoreQ 32 entries</li>
-						<li>I$0 64+ entries of 8 instruction bundles</li>
-						<li>I$1 64kbtytes</li>
-						<li>D$1 64kbytes</li>
-						<li>Combined L2 2-4Mb</li>
+						<li>2 HARTs/CPU (ie multithreaded)
+						<li>CommitQ 64 entries - per HART</li>
+						<li>StoreQ 32 entries - shared</li>
+						<li>I$0 64+ entries of 8 instruction bundles - per HART</li>
+						<li>I$1 64kbtytes - shared</li>
+						<li>D$1 64kbytes - shared</li>
+						<li>Combined L2 2-4Mb - shared</li>
 						<li>This means ~192 max instructions in flight</li>
-						<li>3 integer ALUs</li>
-						<li>1 shifter</li>
-						<li>3 load 2 store (per clock) load store unit</li>
-						<li>1 or 2 multipliers</li>
-						<li>1 or 2 FPUs</li>
-						<li>1 vector unit</li>
-						<li>PLIC/CLIC/CLNT</li>
-						<li>Bit manipulation/crypto extensions	</li>
+						<li>3 integer ALUs - shared</li>
+						<li>1 shifter - shared</li>
+						<li>3 load 2 store (per clock) load store unit - shared</li>
+						<li>1 or 2 multipliers - shared</li>
+						<li>1 or 2 FPUs - shared</li>
+						<li>1 vector unit - shared</li>
+						<li>PLIC/CLIC/CLNT - shared</li>
+						<li>Bit/crypto extensions (mostly in shifter) - shared</li>
 					</ul>
 					</small>
 				</section>
@@ -399,20 +443,24 @@
 					</div>
 				</section>
 				<section>
-					<h2>Where are we up to?</h2>
+					<h2>Research</h2>
+					<div align="left">
 					<small>
+					<p>One of the shorter term goals has been to get a system working well enough so that we can do benchmarks enabling us to optimize things like</p>
 					<ul>
-						<li>Most of the design is in place</li>
-						<li>PLIC/CLIC/CLNT</li>
-						<li>uart/faux disk/timers</li>
-						<li>Coherent caching fabric</li>
-						<li>Boots Linux on AWS FPGA instance</li>
-						<li>Coded for multithreading (very not tested) and multiple CPUs, again not tested – like cache/btc/queue sizes these are simple build options</li>
+						<li>Cache sizes</li>
+						<li>BTC size and architecture</li>
+						<li>commitQ size</li>
+						<li>storeQ size</li>
+						<li>Test a multithreaded system</li>
+						<li>Look at merging branch units and ALUs (this allows us to resolve multiple branches/clock)</li>
+						<li>Investigate splitting out TLB lookup from the load/store unit into it’s own ALU – while it adds a clock it potentially allows us to do smart stuff with instruction reordering, it also may help reach Ghz speeds</li>
 					</ul>
+					<p>We’re at a point now though where the size of the AWS FPGA instances may limit what we can test at large scale</p>
 					</small>
+					</div>
 				</section>
 				<section>
-
 					<h2>Next steps</h2>
 					<small>
 					<p align="left">Planned work:</p>
@@ -432,39 +480,7 @@
 					</small>
 				</section>
 				<section>
-					<h2>Research</h2>
-					<div align="left">
-					<small>
-					<p>One of the shorter term goals has been to get a system working well enough so that we can do benchmarks enabling us to optimize things like</p>
-					<ul>
-						<li>Cache sizes</li>
-						<li>BTC size and architecture</li>
-						<li>commitQ size</li>
-						<li>storeQ size</li>
-						<li>Test a multithreaded system</li>
-						<li>Look at merging branch units and ALUs (this allows us to resolve multiple branches/clock)</li>
-						<li>Investigate splitting out TLB lookup from the load/store unit into it’s own ALU – while it adds a clock it potentially allows us to do smart stuff with instruction reordering, it also may help reach Ghz speeds</li>
-					</ul>
-					<p>We’re at a point now though where the size of the AWS FPGA instances may limit what we can test at large scale</p>
-					</small>
-					</div>
-				</section>
-				<section>
-					<h2>Benchmarks</h2>
-					<div align="left">
-					<small>	
-					<p>As mentioned earlier up until now we've been running with the branch target cache broken on purpose so we can debug operation shootdown in the pipeline. Now (in the past few days) with linux booting we're starting by running dhrystone in linux user mode on the real hardware, and in machine mode on the simulator. The global history part of the BTC is still broken, but the bimodal predictor and return stack seem to be working. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
-					<table>
-					<tr><td>Source</td><td>Dhystone/sec</td><td>DMips</td><td>DMips/Mhz</td></tr>
-					<tr><td>Hardware</td><td>73766</td><td>41</td><td>1.67</td></tr>
-					<tr><td>Simulator</td><td>90093</td><td>51.2</td><td>2.05</td></tr>
-					</table>
-					<p>Looking at the current system performance we could gain a small amount little here with a 3rd ALU, but the big performance issue is still the BTC hit rate - the simulator shows that its larger BTC is definitely a plus.</p>
-					</small>
-					</div>
-				</section>
-				<section>
-					<h2>Trace cache</h2>
+					<h2>I$0 Trace cache</h2>
 					<small>
 					<p align="left">This is probably the most interesting enhancement we can do to the current system to up the issue rate in inner loops to a fixed 8 bundles/clock no matter what size the original instruction was</p>
 					<ul>
