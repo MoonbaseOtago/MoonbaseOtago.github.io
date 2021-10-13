@@ -331,7 +331,7 @@
 					<p>Up until now we've been running with the branch target cache broken on purpose so we can debug shootdown operations in the pipeline. Now (in the past few days) with linux booting we're starting to run dhrystone in linux user mode on the real hardware, and also in machine mode on the simulator. The global history part of the BTC is still broken, but the bimodal predictor and return stack seem to be working. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
 					<table>
 					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/Mhz</td></tr>
-					<tr><td>Hardware</td><td>73766</td><td>41</td><td>1.67</td></tr>
+					<tr><td>Hardware</td><td>81831</td><td>46.5</td><td>1.86</td></tr>
 					<tr><td>Simulator</td><td>90093</td><td>51.2</td><td>2.05</td></tr>
 					</table>
 					<p>Looking at the architectural traces we could gain a small amount little here with a 3rd ALU, but the big performance issue is still the BTC hit rate - the simulator shows that its larger BTC is definitely a plus.</p>
