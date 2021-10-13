@@ -55,7 +55,7 @@
 					</small>
 				</section>
 				<section>
-					<h2>Architerctural Overview</h2>
+					<h2>Architectural Overview</h2>
 					<img width="700" src="assets/overview.svg">
 				</section>
 				<section>
@@ -216,7 +216,7 @@
 					<h2>Schedulers</h2>
 					<small>
 					<ul>
-						<li>Each type of functional unit has a scheduler, they are independant</li>
+						<li>Each type of functional unit has a scheduler, they are independent</li>
 						<li>It looks for instructions ready to execute (ie who’s source registers will have been calculated by the next clock)</li>
 						<li>Schedules the N instructions ready to run closest to the commit end of the commitQ</li>
 						<li>Load/Store scheduler wont re-order stores past stores, or loads past stores (but will reorder loads) – once scheduled (and virt-&gt;phys translation) further reordering can happen</li>
@@ -275,7 +275,7 @@
 						<li>Table walker shares the instruction fetch port to the cache fabric (both are read only – I$1 cache coherency ports can have up to 8 concurrent transactions running at the same time)</li>	
 						<li>16-bit unified (between HARTs) address space ID, or 15-bit unique (per HART) one</li>
 					</ul>
-					<p>Note: 'HART' is a RISC-V term that referes to a unit of execution - for example one portion of a multithreaded core</p>
+					<p>Note: 'HART' is a RISC-V term that refers to a unit of execution - for example one portion of a multithreaded core</p>
 					</div>
 					</small>
 				</section>
@@ -436,7 +436,7 @@
 						<li>BTC flushed on VM switch</li>
 						<li>No speculative fetches to L1/2 caches until they pass VM access</li>
 						<li>Fully associative TLB L1 with random replacement</li>
-						<li>Wide D$1/I$1 way-ness (currently 32-way – also allows for large L1 caches with parallel TLB lookup) combined with random way replacement this muddys any signal an attacker is receiving</li>
+						<li>Wide D$1/I$1 way-ness (currently 32-way – also allows for large L1 caches with parallel TLB lookup) combined with random way replacement this muddies any signal an attacker is receiving</li>
 						<li>Optional D$1 random replacement </li>
 					</ul>
 					</small>
