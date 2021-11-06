@@ -10,8 +10,6 @@
 		<link rel="stylesheet" href="dist/reveal.css">
 		<link rel="stylesheet" href="dist/theme/solarized.css">
 
-		<!-- Theme used for syntax highlighted code -->
-		<! link rel="stylesheet" href="plugin/highlight/monokai.css">
 	</head>
 	<body>
 		<div class="reveal">
@@ -24,6 +22,7 @@
 					<p>paul@taniwha.com @moonbaseotago</p>
 					<img width="300" src="assets/moonbase.png"><br>
 					<small>
+						<p>(Minor changes Nov 6 2021)
 						<p>(C) Copyright Moonbase Otago 2021</p>
 						<p>All rights reserved</p>
 					</small>
@@ -39,7 +38,7 @@
 						<li>2-way simultaneous multithreading capable</li>
 						<li>Multi-core</li>
 						<li>Currently boots Linux on an AWS-FPGA instance</li>
-						<li>Early (low) dhrystone numbers: ~2 DMips/MHz - still a work in progress. Goal ~5 with fully working BTC</li>
+						<li>Early (low) dhrystone numbers: ~3.5 DMips/MHz - still a work in progress. Goal ~4-5 after tuning</li>
 						<li>GPL3 – dual licensing possible</li>
 					</ul>
 					</small>
@@ -328,13 +327,13 @@
 					<h2>Benchmarks</h2>
 					<div align="left">
 					<small>	
-					<p>Up until now we've been running with the branch target cache broken on purpose so we can debug shootdown operations in the pipeline. Now (in the past few days) with linux booting we're starting to run dhrystone in linux user mode on the real hardware, and also in machine mode on the simulator. The global history part of the BTC is still broken, but the bimodal predictor and return stack seem to be working. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
+					<p>Up until now we've been running with the branch target cache broken on purpose so we can debug shootdown operations in the pipeline. Now (in the past few days) with linux booting we're starting to run dhrystone in linux user mode on the real hardware, and also in machine mode on the simulator. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
 					<table>
-					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/Mhz</td></tr>
-					<tr><td>Hardware</td><td>81831</td><td>46.5</td><td>1.86</td></tr>
-					<tr><td>Simulator</td><td>90093</td><td>51.2</td><td>2.05</td></tr>
+					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/MHz</td></tr>
+					<tr><td>Hardware</td><td>136635</td><td>77.7</td><td>3.11</td></tr>
+					<tr><td>Simulator</td><td>152139</td><td>86.5</td><td>3.46</td></tr>
 					</table>
-					<p>Looking at the architectural traces we could gain a small amount little here with a 3rd ALU, but the big performance issue is still the BTC hit rate - the simulator shows that its larger BTC is definitely a plus.</p>
+					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly, there are still minor micro-prediction issues around return instructions to fix, next step is likely to bring up a 3rd ALU and to merge the branch ALUs into the arithmetic ALUs (some performance is now seems limited by having a single branch ALU) - the simulator shows that its larger BTC is definitely a plus. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>
 					</small>
 					</div>
 				</section>
@@ -466,7 +465,8 @@
 					<p align="left">Planned work:</p>
 					<ul>
 						<li>Finish FPU – about 50% done</li>
-						<li>Work on BTC (currently deliberately broken to stress and debug pipeline commitQ shootdown)</li>
+						<li>Work on BTC (almost finished)</li>
+						<li>Look at merging branch ALUs with arithmetic ALUs</li>
 						<li>I$0 trace cache</li>
 						<li>Expand LS unit to 3/2 from 2/1 load/store</li>
 						<li>Rewrite cache coherency fabric with L2</li>
