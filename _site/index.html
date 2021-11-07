@@ -116,7 +116,7 @@ predictor (see  McFarling’s “Combining Branch Predictors” [1]). It has a p
 (PC) to index into a prediction table</li>
   <li>the second is a global history predictor, it uses a hash of the PC and
 a history of recent branches to index a second prediction table, this is better for predicting
-branches that have some contextual pattern</li>
+branches that have some contextual pattern, and</li>
   <li>finally a combined predictor uses a table indexed by a hash of 
 the PC to predict which of the first two predictors is best for a particular branch.</li>
 </ul>
@@ -131,42 +131,42 @@ blog post.</p>
 
 <p>On a more traditional single instruction system
 system prediction would be applied to every instruction in order.
-Our system though is a little different - we decode up to 8 
-instructions per clock - we read a 128 bit (16 byte) naturally aligned decode bundle on every clock.
+Our system though is different - we decode up to 8 
+instructions per clock - we read a 128 bit (16 byte) naturally aligned ‘decode-bundle’ on every clock.
 In the RISC-V C-mode instruction set instructions can be 16 or 32-bit, and are aligned on 16-bit boundaries.
-So each of our decode bundles can contain from 4-8 instructions.
+So each of our decode-bundles can contain from 4-8 instructions.
 Depending on where we enter the bundle and whether a branch causes us to leave early we may actually
 end up decoding between 1 and 8 instructions per clock.</p>
 
-<p>There’s a rule of thumb that (very!) roughly every 5th instruction is a branch - this means that there’s a
+<p>There’s an architectural rule of thumb that (very!) roughly one instruction in five is a branch - this means that there’s a
 pretty good chance that most of our bundles contain a branch - it also means that decoding bigger
 bundles (more instructions per clock) may not give us a lot more performance, in fact our 4-8 may well be a sweet spot
 for this sort of parallelism.</p>
 
-<p>So for our system the thing that we are trying to predict is the behavior of decode bundles rather
+<p>So for our system the thing that we are trying to predict is the behavior of decode-bundles rather
 than that of individual instructions. It’s entirely possible that there is more that one branch instruction in
-a decode bundle in fact there could be up to 8 - luckily all we have to predict is the one branch instruction
-that’s the first branch taken in each bundle, not every branch in the bundle.</p>
+a decode-bundle in fact there could be up to 8 - luckily all we have to predict is the branch instruction
+that’s the first branch that’s taken in each bundle, not every branch in the bundle.</p>
 
-<p>For every decode bundle that we’re currently reading from the icache we
+<p>For every decode-bundle that we’re currently reading from the icache we
 want to predict:</p>
 
 <ul>
-  <li>if there’s a branch in the currently decode bundle being fetched?</li>
+  <li>if there’s a branch in the currently decode-bundle being fetched?</li>
   <li>what is the instruction’s offset within the bundle? (so we don’t decode subsequent instructions)</li>
   <li>will it be it taken?</li>
-  <li>which decode bundle to predict next - either a branch target or the next block.</li>
+  <li>which decode-bundle to predict next - either a branch target or the next decode-bundle in memory.</li>
 </ul>
 
 <p>Our fetch/decode system looks like this (red lines are clock pipeline stages):</p>
 
 <p><img src="/public/images/fetch.svg" alt="placeholder" title="Instruction fetch architecture" /></p>
 
-<p>During every clock we use the PC to fetch a decode bundle from the icache, we want to use this PC to predict the PC to
-use in the next clock, but we won’t know anything about the contents of the data being fetched until after the subsequent clock
+<p>During every clock we use the PC to fetch a decode-bundle from the icache, we want to use this PC to predict the PC to
+use in the next clock, but we won’t know anything about the contents of the data being fetched until one clock later
 (during the instruction decode - between the lower two red lines in the diagram above).</p>
 
-<p>Our decoder is capable doing some work to help us make sense of the instruction stream- it runs in two modes
+<p>Our instruction decoder is capable of doing some work to help us make sense of the instruction stream. It runs in two modes
 starting from the instruction at the offset into the bundle given by the  fetch PC’s lower bits, what it does 
 depends on whether the BTC gave us a prediction:</p>
 
@@ -179,23 +179,23 @@ a branch, or it will stop at any earlier unconditional branch</li>
 <p>The decoders also return the branch destination for any non-indirect branch, and the offset (if any) of the 
 branch that was taken</p>
 
-<p>In unpredicted mode we can discover an initial prediction for a decode bundle and enter it into the BTC, however
-it takes 2 clocks (cache fetch and decode time) before we can choose the next decode bundle - we depend on the BTC
+<p>In unpredicted mode we can discover an initial prediction for a decode-bundle and enter it into the BTC, however
+it takes 2 clocks (cache fetch and decode time) before we can choose the next decode-bundle - we depend on the BTC
 to help us avoid this - we call this a ‘micro-prediction’ because a miss costs us a single clock rather than
 5+ clocks that a missprediction resolved in an ALU costs.</p>
 
 <p>At the end of a decode clock we can check whether the decoder’s branch destination matches the prediction we had made
-a clock before of what the next decode bundle’s address should be. If the PC address we’ve just fetched doesn’t match
+a clock before of what the next decode-bundle’s address should be. If the PC address we’ve just fetched doesn’t match
 the currently decoding bundle’s output we take a micro-prediction miss and refetch it. This can happen when a bundle
 is first accessed, due to aliasing in the BTC, and if code is being changed in memory on the fly. We also check and update
-the prediction of which instruction in the decode bundle branched.</p>
+the prediction of which instruction in the decode-bundle branched.</p>
 
 <h3 id="global-history">Global History</h3>
 
-<p>Our BTC uses a global history predictor - traditionally this contains a bitmask of the N most recent branches - but
-we’re not predicting instructions, we’re predicting decode bundles.</p>
+<p>Our BTC uses a global history predictor - traditionally this contains a bitmask of the N most recent branches, whether they were taken or not - but
+we’re not predicting instructions, we’re predicting decode-bundles.</p>
 
-<p>Consider the following piece of code - it’s made up of 2 decode bundles, it loops 50 times, taking the branch at
+<p>Consider the following piece of code - it’s made up of 2 decode-bundles, it loops 50 times, taking the branch at
 7a: on every second loop and finally taking the branch at 74: when it’s finished</p>
 
 <pre>
@@ -212,8 +212,8 @@ p3:
   84:   8082                    ret
 </pre>
 
-<p>The first bundle contains 3 branches - no matter what happens one of the branches is taken every time around
-the loop. As a source of global history “always branches” is useless for creating a history
+<p>The first bundle contains 3 branches - no matter what happens one of those branches is taken every time around
+the loop. As a source of global history “always branches” is pretty useless for creating a history
 to predict which of the three to take next time. This is because it we need something in the global history
 vector to help distinguish these different branches.</p>
 
@@ -229,10 +229,10 @@ remember that the branch predictor predicts:</p>
 
 <p>That last piece tells us which branch in the bundle to take.</p>
 
-<p>In our implementation instead of just using 
-a single bit of taken/not-taken history per instruction we use 4 bits for each bundle (a ‘taken’ bit and an index into the
+<p>Instead of just using 
+a single bit of taken/not-taken history per branch instruction our implementation use 4 bits for each decode-bundle (a ‘taken’ bit and an index into the
 bundle of the branch that was taken - that same “branch offset within its source bundle” that the 
-branch predictor tries to predict) - this makes for largish history vectors but we can carefully hash them into 
+branch predictor tries to predict) - this makes for largish history vectors but we can cheaply hash them into 
 something smaller to match the sizes of the global tables.</p>
 
 <h3 id="to-recap">To Recap</h3>
@@ -245,7 +245,7 @@ something smaller to match the sizes of the global tables.</p>
   <li>our BTC’s global history includes the bundle offsets of the sources of branches taken</li>
 </ul>
 
-<p>Next time: BTC (Part 2) living in a speculative world</p>
+<p>Next time: BTC (Part 2) Living in a Speculative World</p>
 
 <p>[1] McFarling, Scott (June 1993). “Combining Branch Predictors” (PDF). Digital Western Research Lab (WRL) Technical Report, TN-36.</p>
 
