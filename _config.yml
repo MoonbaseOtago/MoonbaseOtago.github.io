@@ -1,1 +1,20 @@
-theme: jekyll-theme-minimal
+# Dependencies
+markdown:         kramdown
+highlighter:      pygments
+
+# Permalinks
+permalink:        pretty
+
+# Setup
+title:            VRoom!
+tagline:          'Superfast RISC-V'
+description:      'Very high end RISC-V implementation, cloud server class, out of order, super scalar, speculative, up to 8 IPC'
+url:              http://moonbaseoptago.github.io
+baseurl:          /
+
+author:
+  name:           'Paul Campbell'
+  url:            https://twitter.com/MoonbaseOtago
+
+paginate:         5
+

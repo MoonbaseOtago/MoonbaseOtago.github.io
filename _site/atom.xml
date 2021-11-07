@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+
+ <title>VRoom!</title>
+ <link href="http://localhost:4000/atom.xml" rel="self"/>
+ <link href="http://localhost:4000/"/>
+ <updated>2021-11-07T15:28:57+13:00</updated>
+ <id>http://localhost:4000</id>
+ <author>
+   <name>Paul Campbell</name>
+   <email></email>
+ </author>
+
+ 
+ <entry>
+   <title>Branch Target Cache [BTC] (part 1) Predicting Multiple Branches per Clock</title>
+   <link href="http://localhost:4000/2021/10/07/btc-part1/"/>
+   <updated>2021-10-07T00:00:00+13:00</updated>
+   <id>http://localhost:4000/2021/10/07/btc-part1</id>
+   <content type="html">&lt;p&gt;This is going to be the first of an occasional series of articles on the VRoom!/RVoom RISC-V 
+CPU. I’m going to start with issues around the Branch Target Caches (BTC). Until recently our
+BTC has been pretty broken - this was a good thing as it forced our core to exercise its 
+partial pipeline shootdown logic a lot - experience tells us that this is where one finds the hardest bugs ….. Now
+that it’s fixed and working let’s talk a bit about how it works.&lt;/p&gt;
+
+&lt;h3 id=&quot;background&quot;&gt;Background&lt;/h3&gt;
+
+&lt;p&gt;First some background - modern high end CPUs speculatively execute instructions across
+conditional branches. To get high performance CPUs need to be able to correctly predict
+a large proportion of branches - predicting a branch wrongly can cost 5-10 clocks (it’s actually worse in multi-issue 
+CPUs like ours).&lt;/p&gt;
+
+&lt;p&gt;There’s a whole lot of research around the design of BTCs and predictors, we currently use a combined
+predictor (see  McFarling’s “Combining Branch Predictors” [1]). It has a pair of different predictors:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;the first is a binomial predictor, which tries to predict branches that mostly go one way, it uses a hash of the program counter
+(PC) to index into a prediction table&lt;/li&gt;
+  &lt;li&gt;the second is a global history predictor, it uses a hash of the PC and
+a history of recent branches to index a second prediction table, this is better for predicting
+branches that have some contextual pattern&lt;/li&gt;
+  &lt;li&gt;finally a combined predictor uses a table indexed by a hash of 
+the PC to predict which of the first two predictors is best for a particular branch.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/btc.svg&quot; alt=&quot;placeholder&quot; title=&quot;Branch Target Cache example&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;There’s nothing particularly special about using this design, these days it’s relatively conservative - McFarling
+suggests it should predict 97% of branches correctly. We’ll talk more about how the tables are updated in the next
+blog post.&lt;/p&gt;
+
+&lt;h3 id=&quot;bundles-versus-instructions&quot;&gt;Bundles versus instructions&lt;/h3&gt;
+
+&lt;p&gt;On a more traditional single instruction system
+system prediction would be applied to every instruction in order.
+Our system though is a little different - we decode up to 8 
+instructions per clock - we read a 128 bit (16 byte) naturally aligned decode bundle on every clock.
+In the RISC-V C-mode instruction set instructions can be 16 or 32-bit, and are aligned on 16-bit boundaries.
+So each of our decode bundles can contain from 4-8 instructions.
+Depending on where we enter the bundle and whether a branch causes us to leave early we may actually
+end up decoding between 1 and 8 instructions per clock.&lt;/p&gt;
+
+&lt;p&gt;There’s a rule of thumb that (very!) roughly every 5th instruction is a branch - this means that there’s a
+pretty good chance that most of our bundles contain a branch - it also means that decoding bigger
+bundles (more instructions per clock) may not give us a lot more performance, in fact our 4-8 may well be a sweet spot
+for this sort of parallelism.&lt;/p&gt;
+
+&lt;p&gt;So for our system the thing that we are trying to predict is the behavior of decode bundles rather
+than that of individual instructions. It’s entirely possible that there is more that one branch instruction in
+a decode bundle in fact there could be up to 8 - luckily all we have to predict is the one branch instruction
+that’s the first branch taken in each bundle, not every branch in the bundle.&lt;/p&gt;
+
+&lt;p&gt;For every decode bundle that we’re currently reading from the icache we
+want to predict:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;if there’s a branch in the currently decode bundle being fetched?&lt;/li&gt;
+  &lt;li&gt;what is the instruction’s offset within the bundle? (so we don’t decode subsequent instructions)&lt;/li&gt;
+  &lt;li&gt;will it be it taken?&lt;/li&gt;
+  &lt;li&gt;which decode bundle to predict next - either a branch target or the next block.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Our fetch/decode system looks like this (red lines are clock pipeline stages):&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/fetch.svg&quot; alt=&quot;placeholder&quot; title=&quot;Instruction fetch architecture&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;During every clock we use the PC to fetch a decode bundle from the icache, we want to use this PC to predict the PC to
+use in the next clock, but we won’t know anything about the contents of the data being fetched until after the subsequent clock
+(during the instruction decode - between the lower two red lines in the diagram above).&lt;/p&gt;
+
+&lt;p&gt;Our decoder is capable doing some work to help us make sense of the instruction stream- it runs in two modes
+starting from the instruction at the offset into the bundle given by the  fetch PC’s lower bits, what it does 
+depends on whether the BTC gave us a prediction:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;unpredicted mode - it stops decoding at the first unconditional or backwards jumping conditional branch&lt;/li&gt;
+  &lt;li&gt;predicted mode - with a bit mask containing one predicted branch bit it will stop at that offset if it’s
+a branch, or it will stop at any earlier unconditional branch&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The decoders also return the branch destination for any non-indirect branch, and the offset (if any) of the 
+branch that was taken&lt;/p&gt;
+
+&lt;p&gt;In unpredicted mode we can discover an initial prediction for a decode bundle and enter it into the BTC, however
+it takes 2 clocks (cache fetch and decode time) before we can choose the next decode bundle - we depend on the BTC
+to help us avoid this - we call this a ‘micro-prediction’ because a miss costs us a single clock rather than
+5+ clocks that a missprediction resolved in an ALU costs.&lt;/p&gt;
+
+&lt;p&gt;At the end of a decode clock we can check whether the decoder’s branch destination matches the prediction we had made
+a clock before of what the next decode bundle’s address should be. If the PC address we’ve just fetched doesn’t match
+the currently decoding bundle’s output we take a micro-prediction miss and refetch it. This can happen when a bundle
+is first accessed, due to aliasing in the BTC, and if code is being changed in memory on the fly. We also check and update
+the prediction of which instruction in the decode bundle branched.&lt;/p&gt;
+
+&lt;h3 id=&quot;global-history&quot;&gt;Global History&lt;/h3&gt;
+
+&lt;p&gt;Our BTC uses a global history predictor - traditionally this contains a bitmask of the N most recent branches - but
+we’re not predicting instructions, we’re predicting decode bundles.&lt;/p&gt;
+
+&lt;p&gt;Consider the following piece of code - it’s made up of 2 decode bundles, it loops 50 times, taking the branch at
+7a: on every second loop and finally taking the branch at 74: when it’s finished&lt;/p&gt;
+
+&lt;pre&gt;
+p3:
+  70:   03200513                li      a0,50		&amp;lt;- bundle 1
+  74:   c901                    beqz    a0,84 p3+0x14		
+  76:   00157593                andi    a1,a0,1
+  7a:   e199                    bnez    a1,80 p3+0x10
+  7c:   157d                    addi    a0,a0,-1
+  7e:   bfdd                    j       74 p3+0x4
+
+  80:   157d                    addi    a0,a0,-1	&amp;lt;- bundle 2
+  82:   bfcd                    j       74 p3+0x4
+  84:   8082                    ret
+&lt;/pre&gt;
+
+&lt;p&gt;The first bundle contains 3 branches - no matter what happens one of the branches is taken every time around
+the loop. As a source of global history “always branches” is useless for creating a history
+to predict which of the three to take next time. This is because it we need something in the global history
+vector to help distinguish these different branches.&lt;/p&gt;
+
+&lt;p&gt;We need some information to tell us which of the two branches are taken each time we decode the first bundle (it’s
+either the conditional one at 7a:, or the unconditional one at 7e: except at the end of the loop when it’s 74:) -
+remember that the branch predictor predicts:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;whether a branch is taken at all&lt;/li&gt;
+  &lt;li&gt;branch destination address&lt;/li&gt;
+  &lt;li&gt;branch offset with in its source bundle&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;That last piece tells us which branch in the bundle to take.&lt;/p&gt;
+
+&lt;p&gt;In our implementation instead of just using 
+a single bit of taken/not-taken history per instruction we use 4 bits for each bundle (a ‘taken’ bit and an index into the
+bundle of the branch that was taken - that same “branch offset within its source bundle” that the 
+branch predictor tries to predict) - this makes for largish history vectors but we can carefully hash them into 
+something smaller to match the sizes of the global tables.&lt;/p&gt;
+
+&lt;h3 id=&quot;to-recap&quot;&gt;To Recap&lt;/h3&gt;
+
+&lt;p&gt;The important ideas here:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;we decode large bundles of many instructions every clock&lt;/li&gt;
+  &lt;li&gt;we predict bundles not instructions&lt;/li&gt;
+  &lt;li&gt;our BTC’s global history includes the bundle offsets of the sources of branches taken&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Next time: BTC (Part 2) living in a speculative world&lt;/p&gt;
+
+&lt;p&gt;[1] McFarling, Scott (June 1993). “Combining Branch Predictors” (PDF). Digital Western Research Lab (WRL) Technical Report, TN-36.&lt;/p&gt;
+
+</content>
+ </entry>
+ 
+ <entry>
+   <title>Introducing Vroom!</title>
+   <link href="http://localhost:4000/2021/10/06/introducing-vroom/"/>
+   <updated>2021-10-06T00:00:00+13:00</updated>
+   <id>http://localhost:4000/2021/10/06/introducing-vroom</id>
+   <content type="html">&lt;p&gt;&lt;img src=&quot;/talk/assets/chip.png&quot; alt=&quot;placeholder&quot; title=&quot;Branch Target Cache example&quot; /&gt;&lt;/p&gt;
+
+&lt;h3 id=&quot;executive-summary&quot;&gt;Executive Summary&lt;/h3&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;Very high end RISC-V implementation – goal cloud server class&lt;/li&gt;
+  &lt;li&gt;Out of order, super scalar, speculative&lt;/li&gt;
+  &lt;li&gt;RV64-IMAFDCHB(V)&lt;/li&gt;
+  &lt;li&gt;Up to 8 IPC (instructions per clock) peak, goal ~4 average on ALU heavy work&lt;/li&gt;
+  &lt;li&gt;2-way simultaneous multithreading capable&lt;/li&gt;
+  &lt;li&gt;Multi-core&lt;/li&gt;
+  &lt;li&gt;Early (low) dhrystone numbers: ~3.5 DMips/MHz - still a work in progress. Goal ~4-5&lt;/li&gt;
+  &lt;li&gt;Currently boots Linux on an AWS-FPGA instance&lt;/li&gt;
+  &lt;li&gt;GPL3 – dual licensing possible&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3 id=&quot;downloads&quot;&gt;Downloads&lt;/h3&gt;
+
+&lt;p&gt;VRoom! is hosted with GitHub. Head to the &lt;a href=&quot;https://github.com/MoonbaseOtago/vroom&quot;&gt;GitHub repository&lt;/a&gt; for downloads.&lt;/p&gt;
+
+&lt;h3 id=&quot;licensing&quot;&gt;Licensing&lt;/h3&gt;
+
+&lt;p&gt;VRoom! is currently licensed GPL3. We recognize that for many reasons one cannot practically build a large GPL3d chip 
+design - VRoom! is also available to be commercial licensed.&lt;/p&gt;
+
+</content>
+ </entry>
+ 
+
+</feed>
