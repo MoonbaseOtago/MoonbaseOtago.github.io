@@ -4,7 +4,7 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2021-11-07T18:02:58+13:00</updated>
+ <updated>2021-11-08T16:54:35+13:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
@@ -189,7 +189,7 @@ something smaller to match the sizes of the global tables.&lt;/p&gt;
   &lt;li&gt;Up to 8 IPC (instructions per clock) peak, goal ~4 average on ALU heavy work&lt;/li&gt;
   &lt;li&gt;2-way simultaneous multithreading capable&lt;/li&gt;
   &lt;li&gt;Multi-core&lt;/li&gt;
-  &lt;li&gt;Early (low) dhrystone numbers: ~3.5 DMips/MHz - still a work in progress. Goal ~4-5&lt;/li&gt;
+  &lt;li&gt;Early (low) dhrystone numbers: ~3.6 DMips/MHz - still a work in progress. Goal ~4-5&lt;/li&gt;
   &lt;li&gt;Currently boots Linux on an AWS-FPGA instance&lt;/li&gt;
   &lt;li&gt;GPL3 – dual licensing possible&lt;/li&gt;
 &lt;/ul&gt;
