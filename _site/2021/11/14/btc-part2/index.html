@@ -87,7 +87,7 @@
     <div class="content container">
       <div class="post">
   <h1 class="post-title">Branch Target Cache [BTC] (part 2) Living in a Speculative World</h1>
-  <span class="post-date">14 Oct 2021</span>
+  <span class="post-date">14 Nov 2021</span>
   <p>This is the second of an occasional series of articles on the VRoom!/RVoom RISC-V 
 CPU. This week we’re going to talk about how we can create speculative entries 
 in the Branch Target Cache (BTC). A quick reminder of some of what we learned in the previous blog.</p>
@@ -135,7 +135,7 @@ clear:
 1:	std	x0, (a0)
 	add	a0, a0, 8
 	add	a1, a1, -1
-	bnez	1b
+	bnez	a1, 1b
 	ret
 </pre>
 
@@ -199,18 +199,9 @@ On every clock if the oldest entry in the BTC pending queue has its committed bi
     
       <li>
         <h3>
-          <a href="/2021/10/07/btc-part1/">
-            Branch Target Cache [BTC] (part 1) Predicting Multiple Branches per Clock
-            <small>07 Oct 2021</small>
-          </a>
-        </h3>
-      </li>
-    
-      <li>
-        <h3>
-          <a href="/2021/10/06/introducing-vroom/">
+          <a href="/2021/11/06/introducing-vroom/">
             Introducing Vroom!
-            <small>06 Oct 2021</small>
+            <small>06 Nov 2021</small>
           </a>
         </h3>
       </li>
