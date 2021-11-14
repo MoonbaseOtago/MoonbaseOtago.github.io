@@ -330,7 +330,7 @@
 					<p>Up until now we've been running with the branch target cache broken on purpose so we can debug shootdown operations in the pipeline. Now (in the past few days) with linux booting we're starting to run dhrystone in linux user mode on the real hardware, and also in machine mode on the simulator. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
 					<table>
 					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/MHz</td></tr>
-					<tr><td>Hardware</td><td>136635</td><td>77.7</td><td>3.11</td></tr>
+					<tr><td>Hardware</td><td>142314</td><td>80.9</td><td>3.23</td></tr>
 					<tr><td>Simulator</td><td>157898</td><td>89.8</td><td>3.59</td></tr>
 					</table>
 					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly, there are still minor micro-prediction issues around return instructions to fix, next step is likely to bring up a 3rd ALU and to merge the branch ALUs into the arithmetic ALUs (some performance is now seems limited by having a single branch ALU) - the simulator shows that its larger BTC is definitely a plus. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>

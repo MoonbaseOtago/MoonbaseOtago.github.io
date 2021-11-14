@@ -4,13 +4,123 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2021-11-08T16:54:35+13:00</updated>
+ <updated>2021-11-14T21:46:49+13:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
    <email></email>
  </author>
 
+ 
+ <entry>
+   <title>Branch Target Cache [BTC] (part 2) Living in a Speculative World</title>
+   <link href="http://localhost:4000/2021/10/14/btc-part2/"/>
+   <updated>2021-10-14T00:00:00+13:00</updated>
+   <id>http://localhost:4000/2021/10/14/btc-part2</id>
+   <content type="html">&lt;p&gt;This is the second of an occasional series of articles on the VRoom!/RVoom RISC-V 
+CPU. This week we’re going to talk about how we can create speculative entries 
+in the Branch Target Cache (BTC). A quick reminder of some of what we learned in the previous blog.&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;we decode large bundles of many instructions every clock&lt;/li&gt;
+  &lt;li&gt;we predict bundles not instructions&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3 id=&quot;system-architecture&quot;&gt;System Architecture&lt;/h3&gt;
+
+&lt;p&gt;Let’s have a look at an overview of our system architecture:&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/talk/assets/overview.svg&quot; alt=&quot;placeholder&quot; title=&quot;System Architecture&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Instructions are fetched from the instruction cache (I$1), decoded, renamed to commit registers and entered
+into the commitQ. Once in the commitQ instructions can be executed in any order and even after they are
+executed they can be discarded by a trap or a preceding mispredicted branch.&lt;/p&gt;
+
+&lt;p&gt;At the end of the commitQ are committed instructions, when they and all instructions before them are done, all
+branches are correctly predicted, there are no pending traps, then the CPU will retire up to the last 8 
+committed instructions per clock.&lt;/p&gt;
+
+&lt;h3 id=&quot;btc-operations&quot;&gt;BTC Operations&lt;/h3&gt;
+
+&lt;p&gt;Our BTC contains tables that are accessed using hashes constructed from the program counter (PC) and a
+global history. On a traditional system the BTC tables and global history would be updated on every 
+clock, In VROOM! we can have many instructions outstanding, often they are speculative instructions
+that may never be committed - when a branch instruction is processed by the branch ALU and is discovered to have been
+speculated incorrectly it can trigger
+the discard of subsequent speculative instructions (including other branch instructions), branch instructions can
+also be processed out of order.&lt;/p&gt;
+
+&lt;p&gt;Processing branch instructions is important, we want to use branch mis-predictions to update the BTC tables - if
+we assumed that a branch would be taken and it wasn’t we need to back out and change the value that we had 
+previously set them too.&lt;/p&gt;
+
+&lt;p&gt;A simple solution (and the one that we originally tried) was to wait until the commit stage of the CPU
+and then only use instructions that have been committed (and branches that have been resolved) to update the BTC tables.
+It works, but it’s very slow to update (remember that a big version of our CPU can have ~150 instructions in flight at
+once). Consider something like this:&lt;/p&gt;
+
+&lt;pre&gt;
+clear:
+1:	std	x0, (a0)
+	add	a0, a0, 8
+	add	a1, a1, -1
+	bnez	1b
+	ret
+&lt;/pre&gt;
+
+&lt;p&gt;The core of this is a single decode-bundle that always loops and contains 4 instruction in its core.
+The CPU may push 150/4 = 30+ bundles, 30 times around the loop, before we can start updating the
+BTC - this is particularly a problem with global history predictors which to be useful really to be updated 
+on every prediction.&lt;/p&gt;
+
+&lt;h3 id=&quot;a-better-solution&quot;&gt;A better solution&lt;/h3&gt;
+
+&lt;p&gt;Let’s look at how our BTC works:&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/btc.svg&quot; alt=&quot;placeholder&quot; title=&quot;Branch Target Cache example&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;The PC and the global history (a bit vector) are hashed (just some xors and bit swapping) into indexes into the 3
+BTC tables, they’re used to look up the 3 tables. The combined output is used to choose whether the bimodal or
+global history predictor is best for a particular bundle.&lt;/p&gt;
+
+&lt;p&gt;Our solution to the above problems is to create a ‘pending prediction’ queue in front of the normal BTC tables. Each
+entry contains the information about a bundle prediction. Including the PC used for it and the global history at the
+point that it was created.
+Newer predictions are performed by looking into the queue from
+most recent to oldest for each of the 3 hashes (individually and independently) comparing them with the hashes of the
+PC and global history generated in each entry, if no match is found then the value from the main tables is used.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/btc-queue.svg&quot; alt=&quot;placeholder&quot; title=&quot;Branch Target Cache example&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;The per-bundle BTC pending prediction queue acts similarly to the main per-instruction commitQ - in this case
+each instruction in the commitQ carries a reference to the decode-bundle it came from.&lt;/p&gt;
+
+&lt;h3 id=&quot;actions&quot;&gt;Actions&lt;/h3&gt;
+
+&lt;p&gt;If a branch instruction in the commitQ is discovered to be mispredicted
+all the instructions following it are discarded. At the same time entries in the BTC
+prediction queue that are newer than the bundle corresponding to  the mispredicted instruction are also discarded, and the
+prediction queue entry that does correspond to the mispredicted branch has its data updated. Finally that prediction queue’s
+copy of the global history along with the new branch information is used to reload the global history
+vector used for the next BTC prediction.&lt;/p&gt;
+
+&lt;p&gt;Finally each BTC pending queue entry has a ‘committed’ bit - it gets set when all the instructions in the corresponding
+bundle hit the commit state in the commitQ, that means none of them will be mispredicted, or already have been.
+On every clock if the oldest entry in the BTC pending queue has its committed bit set then its data is copied back into the main BTC tables.&lt;/p&gt;
+
+&lt;h3 id=&quot;to-recap&quot;&gt;To Recap&lt;/h3&gt;
+&lt;p&gt;The important ideas here:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;we maintain a queue of pending uncommitted BTC predictions&lt;/li&gt;
+  &lt;li&gt;each entry overrides the ones after it and the main tables&lt;/li&gt;
+  &lt;li&gt;the queue is flushed and the top entry updated on a misprediction&lt;/li&gt;
+  &lt;li&gt;committed data is pushed into the main tables&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Next time: BTC (Part 3) Predicting Subroutine Returns&lt;/p&gt;
+</content>
+ </entry>
  
  <entry>
    <title>Branch Target Cache [BTC] (part 1) Predicting Multiple Branches per Clock</title>
@@ -103,7 +213,7 @@ branch that was taken&lt;/p&gt;
 &lt;p&gt;In unpredicted mode we can discover an initial prediction for a decode-bundle and enter it into the BTC, however
 it takes 2 clocks (cache fetch and decode time) before we can choose the next decode-bundle - we depend on the BTC
 to help us avoid this - we call this a ‘micro-prediction’ because a miss costs us a single clock rather than
-5+ clocks that a missprediction resolved in an ALU costs.&lt;/p&gt;
+5+ clocks that a misprediction resolved in an ALU costs.&lt;/p&gt;
 
 &lt;p&gt;At the end of a decode clock we can check whether the decoder’s branch destination matches the prediction we had made
 a clock before of what the next decode-bundle’s address should be. If the PC address we’ve just fetched doesn’t match

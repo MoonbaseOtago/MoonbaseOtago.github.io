@@ -174,7 +174,7 @@ branch that was taken</p>
 <p>In unpredicted mode we can discover an initial prediction for a decode-bundle and enter it into the BTC, however
 it takes 2 clocks (cache fetch and decode time) before we can choose the next decode-bundle - we depend on the BTC
 to help us avoid this - we call this a ‘micro-prediction’ because a miss costs us a single clock rather than
-5+ clocks that a missprediction resolved in an ALU costs.</p>
+5+ clocks that a misprediction resolved in an ALU costs.</p>
 
 <p>At the end of a decode clock we can check whether the decoder’s branch destination matches the prediction we had made
 a clock before of what the next decode-bundle’s address should be. If the PC address we’ve just fetched doesn’t match
@@ -247,6 +247,15 @@ something smaller to match the sizes of the global tables.</p>
 <div class="related">
   <h2>Related Posts</h2>
   <ul class="related-posts">
+    
+      <li>
+        <h3>
+          <a href="/2021/10/14/btc-part2/">
+            Branch Target Cache [BTC] (part 2) Living in a Speculative World
+            <small>14 Oct 2021</small>
+          </a>
+        </h3>
+      </li>
     
       <li>
         <h3>
