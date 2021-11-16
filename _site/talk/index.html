@@ -38,7 +38,7 @@
 						<li>2-way simultaneous multithreading capable</li>
 						<li>Multi-core</li>
 						<li>Currently boots Linux on an AWS-FPGA instance</li>
-						<li>Early (low) dhrystone numbers: ~3.6 DMips/MHz - still a work in progress. Goal ~4-5 after tuning</li>
+						<li>Early dhrystone numbers: ~4 DMips/MHz - still a work in progress. Goal ~5+ after tuning</li>
 						<li>GPL3 – dual licensing possible</li>
 					</ul>
 					</small>
@@ -331,9 +331,9 @@
 					<table>
 					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/MHz</td></tr>
 					<tr><td>Hardware</td><td>142314</td><td>80.9</td><td>3.23</td></tr>
-					<tr><td>Simulator</td><td>160948</td><td>91.6</td><td>3.66</td></tr>
+					<tr><td>Simulator</td><td>175643</td><td>99.9</td><td>3.99</td></tr>
 					</table>
-					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly, there are still minor micro-prediction issues around return instructions to fix, next step is likely to bring up a 3rd ALU and to merge the branch ALUs into the arithmetic ALUs (some performance is now seems limited by having a single branch ALU) - the simulator shows that its larger BTC is definitely a plus. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>
+					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly - the simulator shows that its larger BTC is definitely a plus, it's also now runnign with dual store issue. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>
 					</small>
 					</div>
 				</section>
