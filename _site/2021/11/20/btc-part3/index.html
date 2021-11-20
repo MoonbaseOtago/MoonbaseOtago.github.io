@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en-us">
+
+  <head>
+  <link href="http://gmpg.org/xfn/11" rel="profile">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+
+  <!-- Enable responsiveness on mobile devices-->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+
+  <title>
+    
+      Branch Target Cache [BTC] (part 3) Managing a speculative subroutine call stack &middot; VRoom!
+    
+  </title>
+
+  <!-- CSS -->
+  <link rel="stylesheet" href="/public/css/poole.css">
+  <link rel="stylesheet" href="/public/css/syntax.css">
+  <link rel="stylesheet" href="/public/css/hyde.css">
+  <link rel="stylesheet" href="http://fonts.googleapis.com/css?family=PT+Sans:400,400italic,700|Abril+Fatface">
+
+  <!-- Icons -->
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/public/apple-touch-icon-144-precomposed.png">
+  <link rel="shortcut icon" type="image/png"href="/talk/assets/moonbase_ico.png">
+
+  <!-- RSS -->
+  <link rel="alternate" type="application/rss+xml" title="RSS" href="/atom.xml">
+</head>
+
+
+  <body class="theme-base-0b">
+
+    <div class="sidebar">
+  <div class="container sidebar-sticky">
+    <div class="sidebar-about">
+      <img src="/public/images/moonbase_small.png">
+      <h1>
+        <a href="/">
+          VRoom!
+        </a>
+      </h1>
+      <p class="lead">Very high end RISC-V implementation, cloud server class, out of order, super scalar, speculative, up to 8 IPC</p>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a class="sidebar-nav-item" href="/">Home</a>
+
+      
+
+      
+      
+        
+          
+        
+      
+        
+          
+            <a class="sidebar-nav-item" href="/about/">About</a>
+          
+        
+      
+        
+      
+        
+          
+            <a class="sidebar-nav-item" href="/contact/">Contact</a>
+          
+        
+      
+        
+          
+        
+      
+
+      <a class="sidebar-nav-item" href="https://MoonbaseOtago.github.io/talk/index.html">Architectural Talk</a>
+      <a class="sidebar-nav-item" href="https://github.com/MoonbaseOtago/vroom">GitHub project</a>
+
+    &copy; 2021 Moonbase Otago<br>All rights reserved.<br>
+    <a class="sidebar-nav-item" href="https://hyde.getpoole.com/">Built with ...</a>
+    </nav>
+  </div>
+</div>
+
+
+    <div class="content container">
+      <div class="post">
+  <h1 class="post-title">Branch Target Cache [BTC] (part 3) Managing a speculative subroutine call stack</h1>
+  <span class="post-date">20 Nov 2021</span>
+  <p>This is the third of an occasional series of articles on the VRoom!/RVoom RISC-V 
+CPU. This week a shorter update, we’re going to talk about how we can create speculative entries 
+in the Branch Target Cache (BTC) call-return stack. A quick reminder of some of what we learned in the previous blog.</p>
+
+<ul>
+  <li>we decode large bundles of many instructions every clock</li>
+  <li>we predict bundles not instructions</li>
+  <li>we maintain a queue of pending uncommitted BTC predictions</li>
+  <li>each entry overrides the ones after it and the main tables</li>
+</ul>
+
+<h3 id="introduction">Introduction</h3>
+
+<p>Last time we talked about how we manage speculated branch target cache (BTC) entries, in short
+we have a queue of speculated BTC updates in front of the normal BTC tables, those entries are
+discarded or updated when a speculated branch is found to have been mispredicted, and retired into the
+main tables when a corresponding branch (or rather bundle of instructions) is committed.</p>
+
+<p><img src="/public/images/btc-queue.svg" alt="placeholder" title="Branch Target Cache example" /></p>
+
+<h3 id="subroutine-call-stack">Subroutine call stack</h3>
+
+<p>In addition to the standard BTC tables we also have a per-access mode call-return stack,
+RISC-V defines for us the instructions that should be used to infer these (and which not to),
+in the BTC we provide a 32-entry stack (smaller for M-mode) of the last 32 subroutine calls
+so we can predict the return address when decoding ret instructions (if we get it wrong it’s
+not the end of the world, it will be corrected when the ret instruction hits the branch ALU)</p>
+
+<p><img src="public/images/stack.svg" width="300" /></p>
+
+<p>Initially we thought we’d just tag branches with a pointer to the top-of stack, and wind it back when we got
+a misprediction, then we found out a case which turned out to have a particularly heavy impact on performance:</p>
+
+<pre>
+
+	.....
+	call	a
+r1:	call	b
+r2	....
+
+a:	bnez	a0, 1f		&lt; branch mispredicted
+	ret
+1:	....
+
+b:	....
+
+</pre>
+
+<p>essentially what happens here is that we speculatively fetch the following instruction stream:</p>
+
+<pre>
+	Instruction		call stack
+	===========		==========
+				
+
+	call	a		r1 -
+	bnez 	a0, 1f		r1 -	&lt; remembers TOS
+	ret			-	&lt; everything from here on is 
+	call	b		r2 -	  mispredicted
+	....				
+
+</pre>
+
+<p>Sometime later the bnez is resolved in the branch ALU and discovered to have been mispredicted. But by that point
+the return address ‘r1’ on the call stack has been popped and replaced with ‘r2’, even though we got the top of stack (TOS)
+correct, its contents are wrong, and can’t be undone when we discover the misprediction.
+This means that at some later time when we finally do return from subroutine ‘a’
+the prediction will be to ‘r2’ rather than ‘r1’ - this in turn will result in another misprediction when that return
+instruction hits the branch ALU, which is exactly what were were trying to avoid.</p>
+
+<h3 id="solution">Solution</h3>
+
+<p>Our solution is to take a similar approach to the one we took for the BTC tables and put a queue of prediction
+history in front of the call/return stack, in this case it’s a queue of push and pop 
+actions. Instead of being indexed by hashes of the PC/global history, it’s simply the TOS address that’s used instead.
+Top of stack always returns the latest push that matches the current TOS (and the top of the actual backing stack otherwise).</p>
+
+<p><img src="public/images/stack-queue.svg" width="400" /></p>
+
+<p>Like BTC speculative queue mentioned in the previous blog entry this queue is managed by the same bundle tag we
+attach to instructions in the commitQ - when a mispredicted branch instruction is discovered then the
+return stack speculative queue is truncated removing entries that correspond to the discarded instruction bundles
+and the TOS updated to the oldest retained entry.</p>
+
+<p>Similarly when the last instruction in an instruction bundle is committed then related  call-return stack
+speculative queue entries are
+tagged ‘committed’, and then written back in order into the call-return stack.</p>
+
+<h3 id="to-recap">To Recap</h3>
+<p>The important ideas here:</p>
+
+<ul>
+  <li>we have call-return stacks to predict the address of return instructions</li>
+  <li>we maintain a queue of speculative push/pop transitions</li>
+  <li>each entry overrides the ones after it and the main tables</li>
+  <li>the queue is flushed on a misprediction</li>
+  <li>committed data is pushed into the main tables</li>
+</ul>
+
+<p>Next time: How our main pipe works - an overview</p>
+
+</div>
+
+<div class="related">
+  <h2>Related Posts</h2>
+  <ul class="related-posts">
+    
+      <li>
+        <h3>
+          <a href="/2021/11/14/btc-part2/">
+            Branch Target Cache [BTC] (part 2) Living in a Speculative World
+            <small>14 Nov 2021</small>
+          </a>
+        </h3>
+      </li>
+    
+      <li>
+        <h3>
+          <a href="/2021/11/06/introducing-vroom/">
+            Introducing Vroom!
+            <small>06 Nov 2021</small>
+          </a>
+        </h3>
+      </li>
+    
+  </ul>
+</div>
+
+    </div>
+
+  </body>
+</html>

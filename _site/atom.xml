@@ -4,13 +4,121 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2021-11-16T21:48:02+13:00</updated>
+ <updated>2021-11-20T14:54:08+13:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
    <email></email>
  </author>
 
+ 
+ <entry>
+   <title>Branch Target Cache [BTC] (part 3) Managing a speculative subroutine call stack</title>
+   <link href="http://localhost:4000/2021/11/20/btc-part3/"/>
+   <updated>2021-11-20T00:00:00+13:00</updated>
+   <id>http://localhost:4000/2021/11/20/btc-part3</id>
+   <content type="html">&lt;p&gt;This is the third of an occasional series of articles on the VRoom!/RVoom RISC-V 
+CPU. This week a shorter update, we’re going to talk about how we can create speculative entries 
+in the Branch Target Cache (BTC) call-return stack. A quick reminder of some of what we learned in the previous blog.&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;we decode large bundles of many instructions every clock&lt;/li&gt;
+  &lt;li&gt;we predict bundles not instructions&lt;/li&gt;
+  &lt;li&gt;we maintain a queue of pending uncommitted BTC predictions&lt;/li&gt;
+  &lt;li&gt;each entry overrides the ones after it and the main tables&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3 id=&quot;introduction&quot;&gt;Introduction&lt;/h3&gt;
+
+&lt;p&gt;Last time we talked about how we manage speculated branch target cache (BTC) entries, in short
+we have a queue of speculated BTC updates in front of the normal BTC tables, those entries are
+discarded or updated when a speculated branch is found to have been mispredicted, and retired into the
+main tables when a corresponding branch (or rather bundle of instructions) is committed.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/btc-queue.svg&quot; alt=&quot;placeholder&quot; title=&quot;Branch Target Cache example&quot; /&gt;&lt;/p&gt;
+
+&lt;h3 id=&quot;subroutine-call-stack&quot;&gt;Subroutine call stack&lt;/h3&gt;
+
+&lt;p&gt;In addition to the standard BTC tables we also have a per-access mode call-return stack,
+RISC-V defines for us the instructions that should be used to infer these (and which not to),
+in the BTC we provide a 32-entry stack (smaller for M-mode) of the last 32 subroutine calls
+so we can predict the return address when decoding ret instructions (if we get it wrong it’s
+not the end of the world, it will be corrected when the ret instruction hits the branch ALU)&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;public/images/stack.svg&quot; width=&quot;300&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Initially we thought we’d just tag branches with a pointer to the top-of stack, and wind it back when we got
+a misprediction, then we found out a case which turned out to have a particularly heavy impact on performance:&lt;/p&gt;
+
+&lt;pre&gt;
+
+	.....
+	call	a
+r1:	call	b
+r2	....
+
+a:	bnez	a0, 1f		&amp;lt; branch mispredicted
+	ret
+1:	....
+
+b:	....
+
+&lt;/pre&gt;
+
+&lt;p&gt;essentially what happens here is that we speculatively fetch the following instruction stream:&lt;/p&gt;
+
+&lt;pre&gt;
+	Instruction		call stack
+	===========		==========
+				
+
+	call	a		r1 -
+	bnez 	a0, 1f		r1 -	&amp;lt; remembers TOS
+	ret			-	&amp;lt; everything from here on is 
+	call	b		r2 -	  mispredicted
+	....				
+
+&lt;/pre&gt;
+
+&lt;p&gt;Sometime later the bnez is resolved in the branch ALU and discovered to have been mispredicted. But by that point
+the return address ‘r1’ on the call stack has been popped and replaced with ‘r2’, even though we got the top of stack (TOS)
+correct, its contents are wrong, and can’t be undone when we discover the misprediction.
+This means that at some later time when we finally do return from subroutine ‘a’
+the prediction will be to ‘r2’ rather than ‘r1’ - this in turn will result in another misprediction when that return
+instruction hits the branch ALU, which is exactly what were were trying to avoid.&lt;/p&gt;
+
+&lt;h3 id=&quot;solution&quot;&gt;Solution&lt;/h3&gt;
+
+&lt;p&gt;Our solution is to take a similar approach to the one we took for the BTC tables and put a queue of prediction
+history in front of the call/return stack, in this case it’s a queue of push and pop 
+actions. Instead of being indexed by hashes of the PC/global history, it’s simply the TOS address that’s used instead.
+Top of stack always returns the latest push that matches the current TOS (and the top of the actual backing stack otherwise).&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;public/images/stack-queue.svg&quot; width=&quot;400&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Like BTC speculative queue mentioned in the previous blog entry this queue is managed by the same bundle tag we
+attach to instructions in the commitQ - when a mispredicted branch instruction is discovered then the
+return stack speculative queue is truncated removing entries that correspond to the discarded instruction bundles
+and the TOS updated to the oldest retained entry.&lt;/p&gt;
+
+&lt;p&gt;Similarly when the last instruction in an instruction bundle is committed then related  call-return stack
+speculative queue entries are
+tagged ‘committed’, and then written back in order into the call-return stack.&lt;/p&gt;
+
+&lt;h3 id=&quot;to-recap&quot;&gt;To Recap&lt;/h3&gt;
+&lt;p&gt;The important ideas here:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;we have call-return stacks to predict the address of return instructions&lt;/li&gt;
+  &lt;li&gt;we maintain a queue of speculative push/pop transitions&lt;/li&gt;
+  &lt;li&gt;each entry overrides the ones after it and the main tables&lt;/li&gt;
+  &lt;li&gt;the queue is flushed on a misprediction&lt;/li&gt;
+  &lt;li&gt;committed data is pushed into the main tables&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Next time: How our main pipe works - an overview&lt;/p&gt;
+</content>
+ </entry>
  
  <entry>
    <title>Branch Target Cache [BTC] (part 2) Living in a Speculative World</title>
