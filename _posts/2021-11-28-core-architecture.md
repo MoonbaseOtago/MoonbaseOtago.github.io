@@ -11,13 +11,21 @@ overview of the system:
 
 ![placeholder](/talk/assets/overview.svg "System Architecture")
 
-The core structure is a first-in-first out queue called the 'commitQ'. Instruction bundles
+The core structure is a first-in-first out queue called the 'commitQ'. Instruction-bundles
 are inserted in-order at one end, and removed in-order at the other
 end once they have been committed.
 
 While in the commitQ instructions can be executed in any order (with some limits like memory
 aliasing for load/store instructions). At any time, if a branch instruction is discovered to have
 been wrongly predicted, the instructions following it in the queue will be discarded.
+
+A note on terminology - previously I've referred to 'decode-bundle's which are a bunch of bytes fetched from the i-cache 
+and fed to the decoders. Here we talk about 'instruction-bundle's which are a bunch of data being passed around 
+through the CPU representing an instruction and what they can do - data in an instruction-bundle includes its PC
+its input/output registers, immediate constants, which ALU type it needs to be fed to, what operation will be
+performed on it, etc - You can think of the decoders as taking a decode-bundle and producing 1-8 instruction-bundles 
+per clock to feed to the renamer.
+
 
 ### Registers and Register Renaming
 
@@ -30,7 +38,7 @@ On the right we have the 31 architectural integer register and the 32 floating p
 
 The commit registers are each staticly bound to one commitQ entry.
 
-When an instruction bundle leaves the decode stage it contains the architectural register numbers of its source
+When an instruction-bundle leaves the decode stage it contains the architectural register numbers of its source
 and destination registers, the renamer pipe stage assigns a commitQ entry (and therefore a commit register) to
 each instruction and tags its output register to be that commit register.
 
@@ -41,7 +49,7 @@ register to either a particular commit register or an architectural register.
 ### Execution
 
 
-Once an instruction bundle is in the commitQ it can't be assigned an ALU until each of its source registers
+Once an instruction-bundle is in the commitQ it can't be assigned an ALU until each of its source registers
 is either an architectural register or it's a commit register that has reached the 'completed' state (ie it's
 either in a commit register, or is being written to one and can be bypassed). Once a commitQ entry is in this state
 it goes into contention to be assigned an ALU and will execute ASAP.
