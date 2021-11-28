@@ -113,9 +113,11 @@ been wrongly predicted, the instructions following it in the queue will be disca
 
 <p>A note on terminology - previously I’ve referred to ‘decode-bundle’s which are a bunch of bytes fetched from the i-cache 
 and fed to the decoders. Here we talk about ‘instruction-bundle’s which are a bunch of data being passed around 
-through the CPU representing an instruction and what they can do - data in an instruction-bundle includes its PC
+through the CPU representing an instruction and what it can do - data in an instruction-bundle includes its PC,
 its input/output registers, immediate constants, which ALU type it needs to be fed to, what operation will be
-performed on it, etc - You can think of the decoders as taking a decode-bundle and producing 1-8 instruction-bundles 
+performed on it there, etc.</p>
+
+<p>You can think of the decoders as taking a decode-bundle and producing 1-8 instruction-bundles 
 per clock to feed to the renamer.</p>
 
 <h3 id="registers-and-register-renaming">Registers and Register Renaming</h3>
