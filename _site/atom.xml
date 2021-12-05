@@ -4,7 +4,7 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2021-12-05T19:50:22+13:00</updated>
+ <updated>2021-12-05T20:05:54+13:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
@@ -32,13 +32,15 @@ and data accesses go through separate L1 caches but the cache coherency protocol
 same data. Cache lines are 512 bits.&lt;/p&gt;
 
 &lt;p&gt;Everything in this space is cache coherent, once the system is booted it’s the only place that code can
-be executed from - because it’s always coherent fence.i is a simple thing for us, all it has to do is to
-wait for the writes to drain from the store queue and then flush the commitQ.&lt;/p&gt;
+be executed from. Because it’s always coherent, the fence.i instruction is a simple thing for us, all it has to do is to
+wait for the writes to drain from the store queue and then flush the commitQ (fences go in the commitQ so all
+that happens when it reaches the end of the queue), subsequent instruction fetches
+pull live modified data from the data cache into the instruction cache.&lt;/p&gt;
 
 &lt;p&gt;At the moment we have either a fake memory emulator on the simulator, or connect to DRAM on the AWS FPGA 
 implementation - both implementations back onto the coherent MOESI bus&lt;/p&gt;
 
-&lt;p&gt;Within this space Main memory (DRAM) starts at address 0x00000000, what happens if you access memory
+&lt;p&gt;Within this space main memory (DRAM) starts at address 0x00000000. What happens if you access memory
 outside of the area where there’s real DRAM is undefined, with the proviso that it wont lock up
 (writes probably get lost or wrap around, reads may return undefined data - it’s up to the real
 memory controller to choose how it behaves - on a big system the memory controller may be on another die).&lt;/p&gt;

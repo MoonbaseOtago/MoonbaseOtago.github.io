@@ -103,13 +103,15 @@ and data accesses go through separate L1 caches but the cache coherency protocol
 same data. Cache lines are 512 bits.</p>
 
 <p>Everything in this space is cache coherent, once the system is booted it’s the only place that code can
-be executed from - because it’s always coherent fence.i is a simple thing for us, all it has to do is to
-wait for the writes to drain from the store queue and then flush the commitQ.</p>
+be executed from. Because it’s always coherent, the fence.i instruction is a simple thing for us, all it has to do is to
+wait for the writes to drain from the store queue and then flush the commitQ (fences go in the commitQ so all
+that happens when it reaches the end of the queue), subsequent instruction fetches
+pull live modified data from the data cache into the instruction cache.</p>
 
 <p>At the moment we have either a fake memory emulator on the simulator, or connect to DRAM on the AWS FPGA 
 implementation - both implementations back onto the coherent MOESI bus</p>
 
-<p>Within this space Main memory (DRAM) starts at address 0x00000000, what happens if you access memory
+<p>Within this space main memory (DRAM) starts at address 0x00000000. What happens if you access memory
 outside of the area where there’s real DRAM is undefined, with the proviso that it wont lock up
 (writes probably get lost or wrap around, reads may return undefined data - it’s up to the real
 memory controller to choose how it behaves - on a big system the memory controller may be on another die).</p>
