@@ -9,7 +9,7 @@ permalink:        pretty
 title:            VRoom!
 tagline:          'Superfast RISC-V'
 description:      'Very high end RISC-V implementation, cloud server class, out of order, super scalar, speculative, up to 8 IPC'
-url:              http://moonbaseoptago.github.io
+url:              http://moonbaseotago.github.io
 baseurl:          /
 
 author:
