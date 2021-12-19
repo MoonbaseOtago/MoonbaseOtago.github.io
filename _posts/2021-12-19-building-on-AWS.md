@@ -6,7 +6,7 @@ title: VRoom! Building on AWS
 ### Introduction
 
 I started doing VLSI design in the early '90s building graphics
-accelerators at 2uM and later in the decade building CPUs at 1.8u-0.5u - gates
+accelerators at 2um and later in the decade building CPUs at 1.8u-0.5u - gates
 and pins were expensive - we once bet the company on the viability of a 208
 pin plastic package, something that paid off magnificently.
 
