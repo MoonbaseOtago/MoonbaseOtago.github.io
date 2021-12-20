@@ -61,6 +61,8 @@ AWS don't want us to trash their hardware so after you've completed building a n
 design you have to submit it for testing - they do a bunch of things presumably looking for over current and over temp issues (we haven't had one rejected yet). This
 takes about an hour.
 
+F1 instances cost ~US$1.50/hour to use, the build systems about US$1/hour.
+
 ### Chip Architecture
 
 AWS provide their "shell", a fixed, pre-laid out interface - you can see it in
