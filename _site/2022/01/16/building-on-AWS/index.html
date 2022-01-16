@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en-us">
+
+  <head>
+  <link href="http://gmpg.org/xfn/11" rel="profile">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+
+  <!-- Enable responsiveness on mobile devices-->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+
+  <title>
+    
+      VRoom! Virtual Memory &middot; VRoom!
+    
+  </title>
+
+  <!-- CSS -->
+  <link rel="stylesheet" href="/public/css/poole.css">
+  <link rel="stylesheet" href="/public/css/syntax.css">
+  <link rel="stylesheet" href="/public/css/hyde.css">
+  <link rel="stylesheet" href="http://fonts.googleapis.com/css?family=PT+Sans:400,400italic,700|Abril+Fatface">
+
+  <!-- Icons -->
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/public/apple-touch-icon-144-precomposed.png">
+  <link rel="shortcut icon" type="image/png"href="/talk/assets/moonbase_ico.png">
+
+  <!-- RSS -->
+  <link rel="alternate" type="application/rss+xml" title="RSS" href="/atom.xml">
+</head>
+
+
+  <body class="theme-base-0b">
+
+    <div class="sidebar">
+  <div class="container sidebar-sticky">
+    <div class="sidebar-about">
+      <a href="/"><img src="/public/images/moonbase_small.png"></a>
+      <h1>
+        <a href="/">
+          VRoom!
+        </a>
+      </h1>
+      <p class="lead">Very high end RISC-V implementation, cloud server class, out of order, super scalar, speculative, up to 8 IPC</p>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a class="sidebar-nav-item" href="/">Home</a>
+
+      
+
+      
+      
+        
+          
+        
+      
+        
+          
+            <a class="sidebar-nav-item" href="/about/">About</a>
+          
+        
+      
+        
+      
+        
+          
+            <a class="sidebar-nav-item" href="/contact/">Contact</a>
+          
+        
+      
+        
+          
+        
+      
+        
+          
+        
+      
+
+      <a class="sidebar-nav-item" href="https://MoonbaseOtago.github.io/talk/index.html">Architectural Talk</a>
+      <a class="sidebar-nav-item" href="https://github.com/MoonbaseOtago/vroom">GitHub project</a>
+
+    &copy; 2021 Moonbase Otago<br>All rights reserved.<br>
+    <a class="sidebar-nav-item" href="https://hyde.getpoole.com/">Built with ...</a>
+    </nav>
+  </div>
+</div>
+
+
+    <div class="content container">
+      <div class="post">
+  <h1 class="post-title">VRoom! Virtual Memory</h1>
+  <span class="post-date">16 Jan 2022</span>
+  <h3 id="introduction">Introduction</h3>
+
+<p>Booting Linux isn’t going to work without some form of virtual memory, RISC-V has
+a well defined spec for VM, implementation isn’t hard - page tables are well defined,
+there’s nothing particularly unusual or surprising there</p>
+
+<h3 id="l1-tlbs">L1 TLBs</h3>
+
+<p>We have separate Instruction and Data level one TLBs, they’re fully associative which means that
+we’re not practically limited to power of two sizes (though currently they have 32 entries each),
+each entry contains a mapping between an ASID and upper bits of a virtual address and a physical
+address - we support the various sizes of pages (both in tags and data).</p>
+
+<p>A fully associative TLB with random replacement makes it harder for Meltdown/Spectre sorts of
+attacks to use TLB replacement to attack systems. On VROOM memory accesses that miss in the TLB never result in
+data cache changes.</p>
+
+<p>Since the ALUs, and in particular the memory and fetch units, are shared between HARTs (CPUs) in the same
+simultaneous multi-threaded core then so are the TLBs shared.  We need a way to distinguish mappings between HARTs - this implementation
+is simple, we reserve a portion of the ASID which is forced to a unique value for each core - each HART thinks it has N bits of ASID, in reality there are N+1. There’s also
+a system flag that we can optionally set that lets SMT HARTs share the full sized ASID (provided the software understands
+that ASIDs are system rather than CPU global).</p>
+
+<p>Currently we use the old trick of doing L1 TLB lookup with the upper bits of a virtual address while using
+the lower bits in parallel to do the indexing of the L1 data/instruction caches - large modern cache line sizes 
+mean that you have to go many ways/sets to get large data and instruction caches - this also helps
+with Meltdown/Spectre/etc mitigation.</p>
+
+<p>I’m currently redesigning the whole memory datapath unit to split TLB lookup and data cache access
+into separate cycles - mostly to expose more parallelism during scheduling - more about that in
+a later posting once it’s all working.</p>
+
+<h3 id="l2-tlbs">L2 TLBs</h3>
+
+<p>TLB misses result in stalled instructions in the commitQ - there’s a small queue of pending TLB 
+lookups in the memory unit and 2 pending lookups in the fetch unit - they feed the table walker
+state machine which starts by dipping into the L2 TLB cache - currently it’s a 4-way 256 entry (so
+1k entries total) set associative cache shared between the instruction and data TLBs - TLB data found here is fed directly to the L1 TLBs (a satisfied L1 miss takes 4
+clocks).</p>
+
+<h3 id="table-walking">Table walking</h3>
+
+<p>If a request also misses in the L2 TLB cache the table walker state machine starts walking page table trees.</p>
+
+<p>Full
+cache lines of TLB data are fetched into a local read-only cache which contains a small number of entries,
+essentially enough for 1 line for each level in the page hierarchy, and 2 for the lowest level, repeated 
+for instruction TLB and the data TLB (then repeated again for multiple HARTs).</p>
+
+<p>After initial filling most table walks hit in this cache. This cache is slightly integrated into the data L1 I-cache, they share a 
+read-only access port into the cache coherency fabric, and both can be invalidated by data cache snoops shootdowns.</p>
+
+<h3 id="tlb-invalidation">TLB Invalidation</h3>
+
+<p>TLB invalidation is triggered by executing a TLB flush instruction - these instructions let the instructions
+before them in the commitQ execute before they themselves are executed.</p>
+
+<p>At this point they trigger a
+commitQ flush (tossing any speculative instructions executed with the old VM mappings). At the same time
+they trigger L1 and L2 TLB flushes. Note: there is no need to invalidate the TLB walker’s small data cache
+as it will have been invalidated (shot down) by the cache coherency protocols if any page tables were
+changed in the process.</p>
+
+<p>Next time: (Once I get it working) Data memory accesses</p>
+
+</div>
+
+<div class="related">
+  <h2>Related Posts</h2>
+  <ul class="related-posts">
+    
+      <li>
+        <h3>
+          <a href="/2021/12/19/building-on-AWS/">
+            VRoom! Building on AWS
+            <small>19 Dec 2021</small>
+          </a>
+        </h3>
+      </li>
+    
+      <li>
+        <h3>
+          <a href="/2021/12/05/memory-layout/">
+            VRoom! Memory Layout
+            <small>05 Dec 2021</small>
+          </a>
+        </h3>
+      </li>
+    
+      <li>
+        <h3>
+          <a href="/2021/11/28/core-architecture/">
+            Core VRoom! Architecture
+            <small>28 Nov 2021</small>
+          </a>
+        </h3>
+      </li>
+    
+  </ul>
+</div>
+
+    </div>
+
+  </body>
+</html>

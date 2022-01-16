@@ -4,13 +4,85 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2021-12-20T16:30:11+13:00</updated>
+ <updated>2022-01-16T15:15:35+13:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
    <email></email>
  </author>
 
+ 
+ <entry>
+   <title>VRoom! Virtual Memory</title>
+   <link href="http://localhost:4000/2022/01/16/building-on-AWS/"/>
+   <updated>2022-01-16T00:00:00+13:00</updated>
+   <id>http://localhost:4000/2022/01/16/building-on-AWS</id>
+   <content type="html">&lt;h3 id=&quot;introduction&quot;&gt;Introduction&lt;/h3&gt;
+
+&lt;p&gt;Booting Linux isn’t going to work without some form of virtual memory, RISC-V has
+a well defined spec for VM, implementation isn’t hard - page tables are well defined,
+there’s nothing particularly unusual or surprising there&lt;/p&gt;
+
+&lt;h3 id=&quot;l1-tlbs&quot;&gt;L1 TLBs&lt;/h3&gt;
+
+&lt;p&gt;We have separate Instruction and Data level one TLBs, they’re fully associative which means that
+we’re not practically limited to power of two sizes (though currently they have 32 entries each),
+each entry contains a mapping between an ASID and upper bits of a virtual address and a physical
+address - we support the various sizes of pages (both in tags and data).&lt;/p&gt;
+
+&lt;p&gt;A fully associative TLB with random replacement makes it harder for Meltdown/Spectre sorts of
+attacks to use TLB replacement to attack systems. On VROOM memory accesses that miss in the TLB never result in
+data cache changes.&lt;/p&gt;
+
+&lt;p&gt;Since the ALUs, and in particular the memory and fetch units, are shared between HARTs (CPUs) in the same
+simultaneous multi-threaded core then so are the TLBs shared.  We need a way to distinguish mappings between HARTs - this implementation
+is simple, we reserve a portion of the ASID which is forced to a unique value for each core - each HART thinks it has N bits of ASID, in reality there are N+1. There’s also
+a system flag that we can optionally set that lets SMT HARTs share the full sized ASID (provided the software understands
+that ASIDs are system rather than CPU global).&lt;/p&gt;
+
+&lt;p&gt;Currently we use the old trick of doing L1 TLB lookup with the upper bits of a virtual address while using
+the lower bits in parallel to do the indexing of the L1 data/instruction caches - large modern cache line sizes 
+mean that you have to go many ways/sets to get large data and instruction caches - this also helps
+with Meltdown/Spectre/etc mitigation.&lt;/p&gt;
+
+&lt;p&gt;I’m currently redesigning the whole memory datapath unit to split TLB lookup and data cache access
+into separate cycles - mostly to expose more parallelism during scheduling - more about that in
+a later posting once it’s all working.&lt;/p&gt;
+
+&lt;h3 id=&quot;l2-tlbs&quot;&gt;L2 TLBs&lt;/h3&gt;
+
+&lt;p&gt;TLB misses result in stalled instructions in the commitQ - there’s a small queue of pending TLB 
+lookups in the memory unit and 2 pending lookups in the fetch unit - they feed the table walker
+state machine which starts by dipping into the L2 TLB cache - currently it’s a 4-way 256 entry (so
+1k entries total) set associative cache shared between the instruction and data TLBs - TLB data found here is fed directly to the L1 TLBs (a satisfied L1 miss takes 4
+clocks).&lt;/p&gt;
+
+&lt;h3 id=&quot;table-walking&quot;&gt;Table walking&lt;/h3&gt;
+
+&lt;p&gt;If a request also misses in the L2 TLB cache the table walker state machine starts walking page table trees.&lt;/p&gt;
+
+&lt;p&gt;Full
+cache lines of TLB data are fetched into a local read-only cache which contains a small number of entries,
+essentially enough for 1 line for each level in the page hierarchy, and 2 for the lowest level, repeated 
+for instruction TLB and the data TLB (then repeated again for multiple HARTs).&lt;/p&gt;
+
+&lt;p&gt;After initial filling most table walks hit in this cache. This cache is slightly integrated into the data L1 I-cache, they share a 
+read-only access port into the cache coherency fabric, and both can be invalidated by data cache snoops shootdowns.&lt;/p&gt;
+
+&lt;h3 id=&quot;tlb-invalidation&quot;&gt;TLB Invalidation&lt;/h3&gt;
+
+&lt;p&gt;TLB invalidation is triggered by executing a TLB flush instruction - these instructions let the instructions
+before them in the commitQ execute before they themselves are executed.&lt;/p&gt;
+
+&lt;p&gt;At this point they trigger a
+commitQ flush (tossing any speculative instructions executed with the old VM mappings). At the same time
+they trigger L1 and L2 TLB flushes. Note: there is no need to invalidate the TLB walker’s small data cache
+as it will have been invalidated (shot down) by the cache coherency protocols if any page tables were
+changed in the process.&lt;/p&gt;
+
+&lt;p&gt;Next time: (Once I get it working) Data memory accesses&lt;/p&gt;
+</content>
+ </entry>
  
  <entry>
    <title>VRoom! Building on AWS</title>
