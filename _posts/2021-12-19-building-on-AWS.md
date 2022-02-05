@@ -20,7 +20,7 @@ When I first compiled up VRoom! for it I had a slight problem .... the design wa
 
 So I went around looking for bigger targets ....
 
-### AWS's F Instances
+### AWS's FPGA Instances
 
 AWS provides an <a href="https://aws.amazon.com/ec2/instance-types/f1/">FPGA based service</a> based on Xilinx's Ultrascale VU9Ps - these are much larger
 FPGAs, just what the doctor ordered. The F instances seem to be aimed at high
