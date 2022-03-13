@@ -11,7 +11,7 @@ title: About
 * Up to 8 IPC (instructions per clock) peak, goal ~4 average on ALU heavy work
 * 2-way simultaneous multithreading capable
 * Multi-core
-* Early dhrystone numbers: ~4 DMips/MHz - still a work in progress. Goal ~5+
+* Shrystone numbers: ~5.9 DMips/MHz - still a work in progress. 
 * Currently boots Linux on an AWS-FPGA instance
 * GPL3 – dual licensing possible
 
@@ -22,6 +22,6 @@ VRoom! is hosted with GitHub. Head to the <a href="https://github.com/MoonbaseOt
 ### Licensing
 
 VRoom! is currently licensed GPL3. We recognise that for many reasons one cannot practically build a large GPL3d chip 
-design - VRoom! is also available to be commercial licensed.
+design - VRoom! is also available to be commercially licensed.
 
 

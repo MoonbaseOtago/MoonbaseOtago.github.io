@@ -22,8 +22,8 @@
 					<p>paul@taniwha.com @moonbaseotago</p>
 					<img width="300" src="assets/moonbase.png"><br>
 					<small>
-						<p>(Minor changes Nov 6 2021)
-						<p>(C) Copyright Moonbase Otago 2021</p>
+						<p>(Minor changes Nov 6 2021, March 20222)
+						<p>(C) Copyright Moonbase Otago 2021-2022</p>
 						<p>All rights reserved</p>
 					</small>
 				</section>
@@ -38,7 +38,7 @@
 						<li>2-way simultaneous multithreading capable</li>
 						<li>Multi-core</li>
 						<li>Currently boots Linux on an AWS-FPGA instance</li>
-						<li>Early dhrystone numbers: ~4 DMips/MHz - still a work in progress. Goal ~5+ after tuning</li>
+						<li>Current dhrystone numbers: ~5.9 DMips/MHz - still a work in progress.</li>
 						<li>GPL3 – dual licensing possible</li>
 					</ul>
 					</small>
@@ -244,6 +244,7 @@
 				<section>
 					<h2>Load/Store/Fence Unit</h2>
 					<small>
+					Note: this area is under active development, check out the blog for more up to date information
 					<ul>
 						<li>Single Unit</li>
 						<li>Can handle 3 concurrent loads and 2 concurrent stores</li>
@@ -331,9 +332,9 @@
 					<table>
 					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/MHz</td></tr>
 					<tr><td>Hardware</td><td>142314</td><td>80.9</td><td>3.23</td></tr>
-					<tr><td>Simulator</td><td>175643</td><td>99.9</td><td>3.99</td></tr>
+					<tr><td>Simulator</td><td>258295</td><td>147</td><td>5.88</td></tr>
 					</table>
-					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly - the simulator shows that its larger BTC is definitely a plus, it's also now runnign with dual store issue. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>
+					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly - the simulator shows that its larger BTC is definitely a plus, it's also now running with the new more parallel load-store units - we haven't built an FOGA version yet. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>
 					</small>
 					</div>
 				</section>
