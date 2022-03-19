@@ -4,7 +4,7 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2022-03-19T15:21:07+13:00</updated>
+ <updated>2022-03-19T15:34:24+13:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
@@ -26,7 +26,7 @@ some performance numbers.&lt;/p&gt;
 
 &lt;p&gt;I found the bug in the BTC - mispredicted 4-byte branches that crossed a 16 byte boundary (our
 instruction bundle size) this is now fixed and we have better dhrystone numbers: 6.33 DMIPS/MHz
-at an IPC of 2.51 - better than I expected! We cans till do better.&lt;/p&gt;
+at an IPC of 2.51 - better than I expected! We can still do better.&lt;/p&gt;
 
 &lt;h3 id=&quot;more-system-verilog-interfaces-for-the-mostly-win&quot;&gt;More System Verilog, Interfaces for the (mostly) win&lt;/h3&gt;
 

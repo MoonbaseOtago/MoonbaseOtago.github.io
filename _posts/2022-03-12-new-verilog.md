@@ -12,7 +12,7 @@ some performance numbers.
 
 I found the bug in the BTC - mispredicted 4-byte branches that crossed a 16 byte boundary (our
 instruction bundle size) this is now fixed and we have better dhrystone numbers: 6.33 DMIPS/MHz
-at an IPC of 2.51 - better than I expected! We cans till do better.
+at an IPC of 2.51 - better than I expected! We can still do better.
 
 ### More System Verilog, Interfaces for the (mostly) win
 
