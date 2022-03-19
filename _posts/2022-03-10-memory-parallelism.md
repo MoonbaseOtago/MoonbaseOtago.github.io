@@ -230,4 +230,4 @@ started investigating getting a build into OpenLane/Skyworks - again not with th
 taping something out (it' probably too big for any of the open source runs) but more as a reality check.
 
 
-Next time: Not quite sure yet - watch this space - probably the results of fixing that BTC thing
+Next time: Verilog changes
