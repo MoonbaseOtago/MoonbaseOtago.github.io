@@ -1,6 +1,6 @@
 ---
 layout: post
-title: VRoom! Memory Layout
+title: VRoom! blog&#58; Memory Layout
 ---
 
 ### Introduction

@@ -38,7 +38,7 @@
 						<li>2-way simultaneous multithreading capable</li>
 						<li>Multi-core</li>
 						<li>Currently boots Linux on an AWS-FPGA instance</li>
-						<li>Current dhrystone numbers: ~6.3 DMips/MHz - still a work in progress.</li>
+						<li>Current dhrystone numbers: ~6.5 DMips/MHz - still a work in progress.</li>
 						<li>GPL3 – dual licensing possible</li>
 					</ul>
 					</small>
@@ -328,13 +328,13 @@
 					<h2>Benchmarks</h2>
 					<div align="left">
 					<small>	
-					<p>Up until now we've been running with the branch target cache broken on purpose so we can debug shootdown operations in the pipeline. Now (in the past few days) with linux booting we're starting to run dhrystone in linux user mode on the real hardware, and also in machine mode on the simulator. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
+					<p>Up until now we've been running with the branch target cache broken on purpose so we can debug shootdown operations in the pipeline. Now with linux booting we're starting to run dhrystone in linux user mode on the real hardware, and also in machine mode on the simulator. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
 					<table>
 					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/MHz</td></tr>
 					<tr><td>Hardware</td><td>142314</td><td>80.9</td><td>3.23</td></tr>
-					<tr><td>Simulator</td><td>278399</td><td>158.4</td><td>6.33</td></tr>
+					<tr><td>Simulator</td><td>285350</td><td>162.4</td><td>6.49</td></tr>
 					</table>
-					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly - the simulator shows that its larger BTC is definitely a plus, it's also now running with the new more parallel load-store units - we haven't built an FOGA version yet. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>
+					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly - the simulator shows that its larger BTC is definitely a plus, it's also now running with the new more parallel load-store units and a combined ALU/branch units - we haven't built an FOGA version yet. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>
 					</small>
 					</div>
 				</section>

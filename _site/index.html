@@ -78,6 +78,7 @@
         
       
 
+      <a class="sidebar-nav-item" href="https://MoonbaseOtago.github.io/index.html">Blog</a>
       <a class="sidebar-nav-item" href="https://MoonbaseOtago.github.io/talk/index.html">Architectural Talk</a>
       <a class="sidebar-nav-item" href="https://github.com/MoonbaseOtago/vroom">GitHub project</a>
 
@@ -93,8 +94,212 @@
   
   <div class="post">
     <h1 class="post-title">
+      <a href="/2022/03/25/combined-branches/">
+        VRoom! blog&#58; Combining ALUs and Branch Units
+      </a>
+    </h1>
+
+    <span class="post-date">25 Mar 2022</span>
+
+    <h3 id="introduction">Introduction</h3>
+
+<p>Wow, this was a fun week <a href="https://news.ycombinator.com/item?id=30755716">VRoom! made it to the front page of HackerNews</a> - for those new here this is an occasional blog post on architectural issues as
+they are investigated - VRoom! is very much a work in progress.</p>
+
+<p>This particular blog entry is about a recent exploration around the way that we handle branches
+and ALUs.</p>
+
+<h3 id="branch-units-vs-alu-units">Branch units vs ALU units</h3>
+
+<p>The current design has 1 branch unit per hart (a ‘hart’ is essentially a RISCV CPU
+context - an N-way simultaneous multi-threaded machine has N harts even if they share
+memory interfaces, caches and ALUs). It also has M ALUs - currently two.</p>
+
+<p>After a lot of thinking about branch units and ALU units it seemed that they have a lot in
+common - both have a 64-bit adder/subtracter in their core, and use 2 register read ports and
+a write port. Branch units only use the write port for call instructions - some branches, unconditional
+relative branches don’t actually hit the commitQ at all, conditional branches simply check that the
+predicted destination is correct, if so they become an effective no-op, otherwise they
+trigger a commitQ flush and a BTC miss.</p>
+
+<p>So we’ve made some changes to the design to be able to optionally make a combined ALU/branch unit,
+and to be able to build the system with those instead of the existing independent branch and ALUs units
+(it’s a Makefile option so relatively easy to change). Running a bunch of tests on our still
+useful Dhrystone we get:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: left">Branch</th>
+      <th style="text-align: left">ALU</th>
+      <th style="text-align: left">Combined</th>
+      <th style="text-align: left">DMips/MHz</th>
+      <th style="text-align: left">Area</th>
+      <th style="text-align: left">Register Ports</th>
+      <th> </th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: left">1</td>
+      <td style="text-align: left">2</td>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">6.33</td>
+      <td style="text-align: left">3x</td>
+      <td style="text-align: left">6/3</td>
+      <td>2022-03-25-combined-branches.md</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">2</td>
+      <td style="text-align: left">6.14</td>
+      <td style="text-align: left">2x</td>
+      <td style="text-align: left">4/2</td>
+      <td> </td>
+    </tr>
+    <tr>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">3</td>
+      <td style="text-align: left">6.49</td>
+      <td style="text-align: left">3x</td>
+      <td style="text-align: left">6/3</td>
+      <td> </td>
+    </tr>
+    <tr>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">4</td>
+      <td style="text-align: left">6.49</td>
+      <td style="text-align: left">4x</td>
+      <td style="text-align: left">8/4</td>
+      <td> </td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Which is interesting - 3 combined Branch/ALU units outperform the existing 1 Branch/2 ALU with
+roughly the same area/register file ports. So we’ll keep that.</p>
+
+<p>It’s also interesting that 4 combined ALUs performs exactly the same as the 3 ALU system (to the clock) even
+though the 4th ALU gets scheduled about 1/12 of the time - essentially this is because because we’re scheduling ALUs
+out of order (and speculatively) the 3rd ALU happily takes on that extra work without changing how fast the
+final instructions get retired.</p>
+
+<p>One other interesting thing here, and the likely reason for much of this performance improvement is
+that we can now retire multiple branches per clock - we need to be able to do something sensible if
+multiple branches fail branch prediction in the same clock - the correct solution is to give priority
+to the misprediction closest to the end of the pipe (since the earlier instruction should cause the later one
+to be flushed from the pipe).</p>
+
+<p>What’s also interesting is: what would happen if we build a 2-hart SMT machine? previously such a system
+would have had 2 branch units and 2 ALUs - looking at current simulations a CPU is keeping 1 ALU busy
+close to 90%, the second to ~50%, the 3rd ~20% - while we don’t have any good simulation data yet we
+can guess that 4 combined ALUs (so about the same area) would likely satisfy a dual SMT system - mostly
+because the 2 threads
+would share I/Dcaches and as a result run a little more slowly (add that to the list of future
+experiments).</p>
+
+<h3 id="vroom-go-boom">VRoom! go Boom!</h3>
+
+<p>Scheduling N units is difficult - essentially we need to look at all the entries in the commitQ and
+choose the one closest to the end of the pipe ready to perform an ALU operation on ALU 0. That’s easy
+the core of it looks something a bit like this (for an 8 entry Q):</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*)
+casez (req) 
+8'b???????1: begin alu0_enable = 1; alu0_rd = 0; end
+8'b??????10: begin alu0_enable = 1; alu0_rd = 1; end
+8'b?????100: begin alu0_enable = 1; alu0_rd = 2; end
+.....
+8'b10000000: begin alu0_enable = 1; alu0_rd = 7; end
+8'b00000000: alu0_enable = 0;
+endcase
+</code></pre></div></div>
+
+<p>for ALU 1 it looks like (answering the question: what is the 2nd bit if 2 or more bits are set):</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*)
+casez (req) 
+8'b??????11: begin alu1_enable = 1; alu1_rd = 1; end
+8'b?????101,
+8'b?????110: begin alu1_enable = 1; alu1_rd = 2; end
+8'b????1001,
+8'b????1010,
+8'b????1100: begin alu1_enable = 1; alu1_rd = 3; end
+.....
+8'b00000000: alu1_enable = 0;
+endcase
+</code></pre></div></div>
+
+<p>For more ALUs it gets more complex for a 3264 entry commitQ it’s also much bigger, for dual
+SMT systems there are 2 commitQs so 64/128 entries (we interleave the request bits from the
+two commitQs to give them fair access to the resources).</p>
+
+<p>Simply listing all the bit combinations with 3 bits set out of 128 bits in a case statement
+just listing all of them gets unruly - but really we do want to express this in a manner
+where we can provide a maximum amount of parallelism to the synthesis tools we’re using, hopefully
+they’ll find optimizations that are not obvious - so long ago we had reformulated it
+to something like this:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*)
+casez (req) 
+8'b???????1: begin alu0_enable = 1; alu0_rd = 0;
+		casez (req[7:1]) 
+		7'b??????1: begin alu1_enable = 1; alu1_rd = 1; end
+		7'b?????10: begin alu1_enable = 1; alu1_rd = 2; end
+		7'b????100: begin alu1_enable = 1; alu1_rd = 3; end
+		.....
+		7'b1000000: begin alu1_enable = 1; alu1_rd = 7; end
+		7'b0000000: alu1_enable = 0;
+		endcase
+	     end
+8'b??????10: begin alu0_enable = 1; alu0_rd = 1; 
+		casez (req[7:2]) 
+		6'b?????1: begin alu1_enable = 1; alu1_rd = 2; end
+		6'b????10: begin alu1_enable = 1; alu1_rd = 3; end
+		6'b???100: begin alu1_enable = 1; alu1_rd = 4; end
+		.....
+		6'b100000: begin alu1_enable = 1; alu1_rd = 7; end
+		6'b000000: alu1_enable = 0;
+		endcase
+	     end
+8'b?????100: begin alu0_enable = 1; alu0_rd = 2; 
+.....
+8'b10000000: begin alu0_enable = 1; alu0_rd = 7; alu1_enable = 0; end
+8'b00000000: begin alu0_enable = 0; alu1_enable = 0; end
+endcase
+</code></pre></div></div>
+
+<p>etc etc we have C code that will spit this out for an arbitrary number of ALUs (arbitrary depths)
+the 2 ALU scheduler for a 32 entry commitQ happily compiles under verilator/iverilog and on
+Vivado (yosys currently goes bang! we suspect upset by this combinatorial explosion). When we switched
+to 3 ALUs (we tried this a while ago) it happily compiled on verilator (takes a while) and runs. When
+we compiled up the 4 ALU scheduler on verilator it went Bang! the kernel OOM killer got it (on a
+96Gb laptop) - looking at the machine generated code it was 200K lines of verilog …. oops … 3 ALUs
+was compiling 50k, 2 ALUs ~10k …. serious combinatorial explosion!</p>
+
+<p>Luckily we’d already found another way to solve this problem elsewhere (we have 6! address units)
+so dropping some other code in to generate this scheduler wasn’t hard (900 lines rather than 200k) -
+we’re going to need to
+spend some time looking at how well this new code performs, it had always been expected to be
+one of the more difficult areas for timing - we might need to find some 95% heuristics here that are
+not perfect but allow us higher core clock speeds - time will tell. Sadly Yosys still goes bang, must be something else.</p>
+
+<h3 id="conclusion">Conclusion</h3>
+
+<p>Combined branch ALUs seem to provide a performance improvement with little increase in area - we’ll
+keep them.</p>
+
+<p>Next time: Probably something about trace caches, might take a while</p>
+
+  </div>
+  
+  <div class="post">
+    <h1 class="post-title">
       <a href="/2022/03/12/new-verilog/">
-        Verilog changes, new performance numbers
+        VRoom! blog&#58; Verilog changes, new performance numbers
       </a>
     </h1>
 
@@ -209,14 +414,14 @@ for large repetitive things that could be ruined by fat finger typos.</p>
 
 <p>You can find the new load/store interfaces in “lstypes.si”.</p>
 
-<p>Next time: Not quite sure yet - watch this space</p>
+<p>Next time: Combining ALUs and Branch units</p>
 
   </div>
   
   <div class="post">
     <h1 class="post-title">
       <a href="/2022/03/10/memory-parallelism/">
-        VRoom! Memory Parallelism
+        VRoom! blog&#58; Memory Parallelism
       </a>
     </h1>
 
@@ -457,7 +662,7 @@ taping something out (it’ probably too big for any of the open source runs) bu
   <div class="post">
     <h1 class="post-title">
       <a href="/2022/01/16/virtual-memory/">
-        VRoom! Virtual Memory
+        VRoom! blog&#58; Virtual Memory
       </a>
     </h1>
 
@@ -533,7 +738,7 @@ changed in the process.</p>
   <div class="post">
     <h1 class="post-title">
       <a href="/2021/12/19/building-on-AWS/">
-        VRoom! Building on AWS
+        VRoom! blog&#58; Building on AWS
       </a>
     </h1>
 
@@ -638,82 +843,6 @@ to embed one’s own IP) - there are no secrets on our part, we’re happy
 to share if anyone is interested.</p>
 
 <p>Next time: (probably after Xmas) Virtual Memory</p>
-
-  </div>
-  
-  <div class="post">
-    <h1 class="post-title">
-      <a href="/2021/12/05/memory-layout/">
-        VRoom! Memory Layout
-      </a>
-    </h1>
-
-    <span class="post-date">05 Dec 2021</span>
-
-    <h3 id="introduction">Introduction</h3>
-
-<p>A short post this week about physical memory layout and a little bit about booting. I’ll talk more
-about virtual memory another time</p>
-
-<h3 id="physical-memory-layout">Physical memory layout</h3>
-
-<p>We currently use a 56-bit physical address, this is the address used with the MMU disabled or after a
-virtual address has been translated.</p>
-
-<p>Addresses with bit 55 (the most significant bit) set to 0 are treated as cacheable memory space - instruction
-and data accesses go through separate L1 caches but the cache coherency protocol makes sure that they see the
-same data. Cache lines are 512 bits.</p>
-
-<p>Everything in this space is cache coherent, once the system is booted it’s the only place that code can
-be executed from. Because it’s always coherent, the fence.i instruction is a simple thing for us, all it has to do is to
-wait for the writes to drain from the store queue and then flush the commitQ (fences go in the commitQ so all
-that happens when it reaches the end of the queue), subsequent instruction fetches
-pull live modified data from the data cache into the instruction cache.</p>
-
-<p>At the moment we have either a fake memory emulator on the simulator, or connect to DRAM on the AWS FPGA 
-implementation - both implementations back onto the coherent MOESI bus</p>
-
-<p>Within this space main memory (DRAM) starts at address 0x00000000. What happens if you access memory
-outside of the area where there’s real DRAM is undefined, with the proviso that it wont lock up
-(writes probably get lost or wrap around, reads may return undefined data - it’s up to the real
-memory controller to choose how it behaves - on a big system the memory controller may be on another die).</p>
-
-<p>Addresses with bit 55 set are handled differently for data accesses and instruction accesses:</p>
-<ul>
-  <li>instruction accesses got to a boot ROM at a known fixed address, the MMU never generates these addresses</li>
-  <li>data accesses go to a shared 64-bit IO bus (can be accessed through the MMU)</li>
-</ul>
-
-<p>The current data IO bus contains:</p>
-<ul>
-  <li>a ROM containing a device tree image</li>
-  <li>timers</li>
-  <li>a uart</li>
-  <li>gpio</li>
-  <li>multiple interrupt controllers PLIC/CLNT/CLIC</li>
-  <li>a fake disk controller</li>
-</ul>
-
-<h3 id="booting">Booting</h3>
-
-<p>Currently reset causes the CPU to jump to the start of code compiled into hardware in the special instruction space.
-Currently that code:</p>
-<ul>
-  <li>checks a GPIO pin (reads from IO space)</li>
-  <li>if it’s set it jumps to address 0 (this is for the simulator where main memory can be side loaded)</li>
-  <li>if it’s clear we read a boot image from the fake disk controller (connected to test fixture code on
-the simulator, and to linux user space on the AWS FPGA world) into main memory, then jump to it
-(currently we load uboot/OpenSBI)</li>
-</ul>
-
-<p>Longer term we plan to put the two L1 caches into a mode at reset where the memory controller is disabled
-and the data cache allocates lines on write, the instruction cache will use the existing cache coherency protocol
-to pull shared cache lines from the data cache. The on-chip bootstrap will copy data into L1 from an SD/eMMC, validate it
-(a crypto signature check), and jump into it. This code will initialize the DRAM controller, run it through
-its startup conditioning, initialize the rest of the devices, take the cache controller out of
-its reset mode and then finally load OpenSBi/UEFI/uboot/etc into DRAM.</p>
-
-<p>Next time: Building on AWS</p>
 
   </div>
   

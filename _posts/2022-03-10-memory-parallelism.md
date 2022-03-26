@@ -1,6 +1,6 @@
 ---
 layout: post
-title: VRoom! Memory Parallelism
+title: VRoom! blog&#58; Memory Parallelism
 ---
 
 ### Introduction

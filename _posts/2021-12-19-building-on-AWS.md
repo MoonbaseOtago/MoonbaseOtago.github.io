@@ -1,6 +1,6 @@
 ---
 layout: post
-title: VRoom! Building on AWS
+title: VRoom! blog&#58; Building on AWS
 ---
 
 ### Introduction

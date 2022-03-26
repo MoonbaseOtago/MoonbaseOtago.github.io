@@ -1,6 +1,6 @@
 ---
 layout: post
-title: Verilog changes, new performance numbers
+title: VRoom! blog&#58; Verilog changes, new performance numbers
 ---
 
 ### Introduction
@@ -110,4 +110,4 @@ for large repetitive things that could be ruined by fat finger typos.
 You can find the new load/store interfaces in "lstypes.si".
 
 
-Next time: Not quite sure yet - watch this space
+Next time: Combining ALUs and Branch units

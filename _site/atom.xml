@@ -4,7 +4,7 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2022-03-19T15:34:24+13:00</updated>
+ <updated>2022-03-26T15:13:47+13:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
@@ -13,7 +13,207 @@
 
  
  <entry>
-   <title>Verilog changes, new performance numbers</title>
+   <title>VRoom! blog&#58; Combining ALUs and Branch Units</title>
+   <link href="http://localhost:4000/2022/03/25/combined-branches/"/>
+   <updated>2022-03-25T00:00:00+13:00</updated>
+   <id>http://localhost:4000/2022/03/25/combined-branches</id>
+   <content type="html">&lt;h3 id=&quot;introduction&quot;&gt;Introduction&lt;/h3&gt;
+
+&lt;p&gt;Wow, this was a fun week &lt;a href=&quot;https://news.ycombinator.com/item?id=30755716&quot;&gt;VRoom! made it to the front page of HackerNews&lt;/a&gt; - for those new here this is an occasional blog post on architectural issues as
+they are investigated - VRoom! is very much a work in progress.&lt;/p&gt;
+
+&lt;p&gt;This particular blog entry is about a recent exploration around the way that we handle branches
+and ALUs.&lt;/p&gt;
+
+&lt;h3 id=&quot;branch-units-vs-alu-units&quot;&gt;Branch units vs ALU units&lt;/h3&gt;
+
+&lt;p&gt;The current design has 1 branch unit per hart (a ‘hart’ is essentially a RISCV CPU
+context - an N-way simultaneous multi-threaded machine has N harts even if they share
+memory interfaces, caches and ALUs). It also has M ALUs - currently two.&lt;/p&gt;
+
+&lt;p&gt;After a lot of thinking about branch units and ALU units it seemed that they have a lot in
+common - both have a 64-bit adder/subtracter in their core, and use 2 register read ports and
+a write port. Branch units only use the write port for call instructions - some branches, unconditional
+relative branches don’t actually hit the commitQ at all, conditional branches simply check that the
+predicted destination is correct, if so they become an effective no-op, otherwise they
+trigger a commitQ flush and a BTC miss.&lt;/p&gt;
+
+&lt;p&gt;So we’ve made some changes to the design to be able to optionally make a combined ALU/branch unit,
+and to be able to build the system with those instead of the existing independent branch and ALUs units
+(it’s a Makefile option so relatively easy to change). Running a bunch of tests on our still
+useful Dhrystone we get:&lt;/p&gt;
+
+&lt;table&gt;
+  &lt;thead&gt;
+    &lt;tr&gt;
+      &lt;th style=&quot;text-align: left&quot;&gt;Branch&lt;/th&gt;
+      &lt;th style=&quot;text-align: left&quot;&gt;ALU&lt;/th&gt;
+      &lt;th style=&quot;text-align: left&quot;&gt;Combined&lt;/th&gt;
+      &lt;th style=&quot;text-align: left&quot;&gt;DMips/MHz&lt;/th&gt;
+      &lt;th style=&quot;text-align: left&quot;&gt;Area&lt;/th&gt;
+      &lt;th style=&quot;text-align: left&quot;&gt;Register Ports&lt;/th&gt;
+      &lt;th&gt; &lt;/th&gt;
+    &lt;/tr&gt;
+  &lt;/thead&gt;
+  &lt;tbody&gt;
+    &lt;tr&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;1&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;2&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;0&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;6.33&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;3x&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;6/3&lt;/td&gt;
+      &lt;td&gt;2022-03-25-combined-branches.md&lt;/td&gt;
+    &lt;/tr&gt;
+    &lt;tr&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;0&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;0&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;2&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;6.14&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;2x&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;4/2&lt;/td&gt;
+      &lt;td&gt; &lt;/td&gt;
+    &lt;/tr&gt;
+    &lt;tr&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;0&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;0&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;3&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;6.49&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;3x&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;6/3&lt;/td&gt;
+      &lt;td&gt; &lt;/td&gt;
+    &lt;/tr&gt;
+    &lt;tr&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;0&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;0&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;4&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;6.49&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;4x&lt;/td&gt;
+      &lt;td style=&quot;text-align: left&quot;&gt;8/4&lt;/td&gt;
+      &lt;td&gt; &lt;/td&gt;
+    &lt;/tr&gt;
+  &lt;/tbody&gt;
+&lt;/table&gt;
+
+&lt;p&gt;Which is interesting - 3 combined Branch/ALU units outperform the existing 1 Branch/2 ALU with
+roughly the same area/register file ports. So we’ll keep that.&lt;/p&gt;
+
+&lt;p&gt;It’s also interesting that 4 combined ALUs performs exactly the same as the 3 ALU system (to the clock) even
+though the 4th ALU gets scheduled about 1/12 of the time - essentially this is because because we’re scheduling ALUs
+out of order (and speculatively) the 3rd ALU happily takes on that extra work without changing how fast the
+final instructions get retired.&lt;/p&gt;
+
+&lt;p&gt;One other interesting thing here, and the likely reason for much of this performance improvement is
+that we can now retire multiple branches per clock - we need to be able to do something sensible if
+multiple branches fail branch prediction in the same clock - the correct solution is to give priority
+to the misprediction closest to the end of the pipe (since the earlier instruction should cause the later one
+to be flushed from the pipe).&lt;/p&gt;
+
+&lt;p&gt;What’s also interesting is: what would happen if we build a 2-hart SMT machine? previously such a system
+would have had 2 branch units and 2 ALUs - looking at current simulations a CPU is keeping 1 ALU busy
+close to 90%, the second to ~50%, the 3rd ~20% - while we don’t have any good simulation data yet we
+can guess that 4 combined ALUs (so about the same area) would likely satisfy a dual SMT system - mostly
+because the 2 threads
+would share I/Dcaches and as a result run a little more slowly (add that to the list of future
+experiments).&lt;/p&gt;
+
+&lt;h3 id=&quot;vroom-go-boom&quot;&gt;VRoom! go Boom!&lt;/h3&gt;
+
+&lt;p&gt;Scheduling N units is difficult - essentially we need to look at all the entries in the commitQ and
+choose the one closest to the end of the pipe ready to perform an ALU operation on ALU 0. That’s easy
+the core of it looks something a bit like this (for an 8 entry Q):&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;always @(*)
+casez (req) 
+8'b???????1: begin alu0_enable = 1; alu0_rd = 0; end
+8'b??????10: begin alu0_enable = 1; alu0_rd = 1; end
+8'b?????100: begin alu0_enable = 1; alu0_rd = 2; end
+.....
+8'b10000000: begin alu0_enable = 1; alu0_rd = 7; end
+8'b00000000: alu0_enable = 0;
+endcase
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;for ALU 1 it looks like (answering the question: what is the 2nd bit if 2 or more bits are set):&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;always @(*)
+casez (req) 
+8'b??????11: begin alu1_enable = 1; alu1_rd = 1; end
+8'b?????101,
+8'b?????110: begin alu1_enable = 1; alu1_rd = 2; end
+8'b????1001,
+8'b????1010,
+8'b????1100: begin alu1_enable = 1; alu1_rd = 3; end
+.....
+8'b00000000: alu1_enable = 0;
+endcase
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;For more ALUs it gets more complex for a 3264 entry commitQ it’s also much bigger, for dual
+SMT systems there are 2 commitQs so 64/128 entries (we interleave the request bits from the
+two commitQs to give them fair access to the resources).&lt;/p&gt;
+
+&lt;p&gt;Simply listing all the bit combinations with 3 bits set out of 128 bits in a case statement
+just listing all of them gets unruly - but really we do want to express this in a manner
+where we can provide a maximum amount of parallelism to the synthesis tools we’re using, hopefully
+they’ll find optimizations that are not obvious - so long ago we had reformulated it
+to something like this:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;always @(*)
+casez (req) 
+8'b???????1: begin alu0_enable = 1; alu0_rd = 0;
+		casez (req[7:1]) 
+		7'b??????1: begin alu1_enable = 1; alu1_rd = 1; end
+		7'b?????10: begin alu1_enable = 1; alu1_rd = 2; end
+		7'b????100: begin alu1_enable = 1; alu1_rd = 3; end
+		.....
+		7'b1000000: begin alu1_enable = 1; alu1_rd = 7; end
+		7'b0000000: alu1_enable = 0;
+		endcase
+	     end
+8'b??????10: begin alu0_enable = 1; alu0_rd = 1; 
+		casez (req[7:2]) 
+		6'b?????1: begin alu1_enable = 1; alu1_rd = 2; end
+		6'b????10: begin alu1_enable = 1; alu1_rd = 3; end
+		6'b???100: begin alu1_enable = 1; alu1_rd = 4; end
+		.....
+		6'b100000: begin alu1_enable = 1; alu1_rd = 7; end
+		6'b000000: alu1_enable = 0;
+		endcase
+	     end
+8'b?????100: begin alu0_enable = 1; alu0_rd = 2; 
+.....
+8'b10000000: begin alu0_enable = 1; alu0_rd = 7; alu1_enable = 0; end
+8'b00000000: begin alu0_enable = 0; alu1_enable = 0; end
+endcase
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;etc etc we have C code that will spit this out for an arbitrary number of ALUs (arbitrary depths)
+the 2 ALU scheduler for a 32 entry commitQ happily compiles under verilator/iverilog and on
+Vivado (yosys currently goes bang! we suspect upset by this combinatorial explosion). When we switched
+to 3 ALUs (we tried this a while ago) it happily compiled on verilator (takes a while) and runs. When
+we compiled up the 4 ALU scheduler on verilator it went Bang! the kernel OOM killer got it (on a
+96Gb laptop) - looking at the machine generated code it was 200K lines of verilog …. oops … 3 ALUs
+was compiling 50k, 2 ALUs ~10k …. serious combinatorial explosion!&lt;/p&gt;
+
+&lt;p&gt;Luckily we’d already found another way to solve this problem elsewhere (we have 6! address units)
+so dropping some other code in to generate this scheduler wasn’t hard (900 lines rather than 200k) -
+we’re going to need to
+spend some time looking at how well this new code performs, it had always been expected to be
+one of the more difficult areas for timing - we might need to find some 95% heuristics here that are
+not perfect but allow us higher core clock speeds - time will tell. Sadly Yosys still goes bang, must be something else.&lt;/p&gt;
+
+&lt;h3 id=&quot;conclusion&quot;&gt;Conclusion&lt;/h3&gt;
+
+&lt;p&gt;Combined branch ALUs seem to provide a performance improvement with little increase in area - we’ll
+keep them.&lt;/p&gt;
+
+&lt;p&gt;Next time: Probably something about trace caches, might take a while&lt;/p&gt;
+</content>
+ </entry>
+ 
+ <entry>
+   <title>VRoom! blog&#58; Verilog changes, new performance numbers</title>
    <link href="http://localhost:4000/2022/03/12/new-verilog/"/>
    <updated>2022-03-12T00:00:00+13:00</updated>
    <id>http://localhost:4000/2022/03/12/new-verilog</id>
@@ -126,12 +326,12 @@ for large repetitive things that could be ruined by fat finger typos.&lt;/p&gt;
 
 &lt;p&gt;You can find the new load/store interfaces in “lstypes.si”.&lt;/p&gt;
 
-&lt;p&gt;Next time: Not quite sure yet - watch this space&lt;/p&gt;
+&lt;p&gt;Next time: Combining ALUs and Branch units&lt;/p&gt;
 </content>
  </entry>
  
  <entry>
-   <title>VRoom! Memory Parallelism</title>
+   <title>VRoom! blog&#58; Memory Parallelism</title>
    <link href="http://localhost:4000/2022/03/10/memory-parallelism/"/>
    <updated>2022-03-10T00:00:00+13:00</updated>
    <id>http://localhost:4000/2022/03/10/memory-parallelism</id>
@@ -368,7 +568,7 @@ taping something out (it’ probably too big for any of the open source runs) bu
  </entry>
  
  <entry>
-   <title>VRoom! Virtual Memory</title>
+   <title>VRoom! blog&#58; Virtual Memory</title>
    <link href="http://localhost:4000/2022/01/16/virtual-memory/"/>
    <updated>2022-01-16T00:00:00+13:00</updated>
    <id>http://localhost:4000/2022/01/16/virtual-memory</id>
@@ -440,7 +640,7 @@ changed in the process.&lt;/p&gt;
  </entry>
  
  <entry>
-   <title>VRoom! Building on AWS</title>
+   <title>VRoom! blog&#58; Building on AWS</title>
    <link href="http://localhost:4000/2021/12/19/building-on-AWS/"/>
    <updated>2021-12-19T00:00:00+13:00</updated>
    <id>http://localhost:4000/2021/12/19/building-on-AWS</id>
@@ -547,7 +747,7 @@ to share if anyone is interested.&lt;/p&gt;
  </entry>
  
  <entry>
-   <title>VRoom! Memory Layout</title>
+   <title>VRoom! blog&#58; Memory Layout</title>
    <link href="http://localhost:4000/2021/12/05/memory-layout/"/>
    <updated>2021-12-05T00:00:00+13:00</updated>
    <id>http://localhost:4000/2021/12/05/memory-layout</id>
@@ -619,7 +819,7 @@ its reset mode and then finally load OpenSBi/UEFI/uboot/etc into DRAM.&lt;/p&gt;
  </entry>
  
  <entry>
-   <title>Core VRoom! Architecture</title>
+   <title>Vroom! blog&#58; Core VRoom! Architecture</title>
    <link href="http://localhost:4000/2021/11/28/core-architecture/"/>
    <updated>2021-11-28T00:00:00+13:00</updated>
    <id>http://localhost:4000/2021/11/28/core-architecture</id>
@@ -750,7 +950,7 @@ They then tell the fetcher to start fetching from a new address.&lt;/p&gt;
  </entry>
  
  <entry>
-   <title>Branch Target Cache [BTC] (part 3) Managing a speculative subroutine call stack</title>
+   <title>VRoom! blog&#58; Branch Target Cache [BTC] (part 3) Managing a speculative subroutine call stack</title>
    <link href="http://localhost:4000/2021/11/20/btc-part3/"/>
    <updated>2021-11-20T00:00:00+13:00</updated>
    <id>http://localhost:4000/2021/11/20/btc-part3</id>
@@ -858,7 +1058,7 @@ tagged ‘committed’, and then written back in order into the call-return stac
  </entry>
  
  <entry>
-   <title>Branch Target Cache [BTC] (part 2) Living in a Speculative World</title>
+   <title>VRoom! blog&#58; Branch Target Cache [BTC] (part 2) Living in a Speculative World</title>
    <link href="http://localhost:4000/2021/11/14/btc-part2/"/>
    <updated>2021-11-14T00:00:00+13:00</updated>
    <id>http://localhost:4000/2021/11/14/btc-part2</id>
@@ -968,7 +1168,7 @@ On every clock if the oldest entry in the BTC pending queue has its committed bi
  </entry>
  
  <entry>
-   <title>Introducing Vroom!</title>
+   <title>Blog&#58; Introducing Vroom!</title>
    <link href="http://localhost:4000/2021/11/06/introducing-vroom/"/>
    <updated>2021-11-06T00:00:00+13:00</updated>
    <id>http://localhost:4000/2021/11/06/introducing-vroom</id>
