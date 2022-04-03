@@ -12,5 +12,5 @@ group :jekyll_plugins do
   gem "jekyll-coffeescript"
   gem "jekyll-assets"
   gem "jekyll-paginate"
-  gem 'jekyll-feed'
+  gem "jekyll-feed", "~> 0.9"
 end
