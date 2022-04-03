@@ -18,3 +18,5 @@ author:
 
 paginate:         5
 
+plugins:
+  - jekyll-feed
