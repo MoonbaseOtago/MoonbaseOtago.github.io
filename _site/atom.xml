@@ -4,13 +4,147 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2022-04-03T19:51:49+12:00</updated>
+ <updated>2022-05-01T11:48:31+12:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
    <email></email>
  </author>
 
+ 
+ <entry>
+   <title>VRoom! blog&#58; Trace cache - Part 1</title>
+   <link href="http://localhost:4000/2022/04/30/trace-part1/"/>
+   <updated>2022-04-30T00:00:00+12:00</updated>
+   <id>http://localhost:4000/2022/04/30/trace-part1</id>
+   <content type="html">&lt;h3 id=&quot;introduction&quot;&gt;Introduction&lt;/h3&gt;
+
+&lt;p&gt;I’ve spent the past month working on adding a trace cache to VRoom! - it’s not done yet but is mildly
+functional. Here’s a quick write up of what I’ve done so far.&lt;/p&gt;
+
+&lt;h3 id=&quot;what-is-a-trace-cache&quot;&gt;What is a Trace cache?&lt;/h3&gt;
+
+&lt;p&gt;Essentially a trace cache is an instruction cache of already decoded instructions. On a CISC CPU like an Intel/AMD x86 it might contain RISC-like micro-operations decoded from complicated CISC instructions.&lt;/p&gt;
+
+&lt;p&gt;On VRoom! we have an instruction decode that every clock can decode 4 32-bit instructions, 8 16-bit instructions, or some mixture of the two from an 128-bit bundle fetched from the L1 instruction cache. Theoretically we can feed our CPU’s core (the renamer onwards) with 8 instructions on every clock, but in reality we seldom do. There are four main reasons why:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;we can only get 8 instructions per clock through the decoder if they are all 16-bit instructions - most instruction streams are a mix of both 16-bit and 32-bit instructions&lt;/li&gt;
+  &lt;li&gt;there’s a very rough rule of thumb from computer architecture in general that says that about every 5th instruction is a branch - with potentially 8 instructions per icache fetch that means that (very roughly) on average only 5 of them get executed&lt;/li&gt;
+  &lt;li&gt;branch targets are not always on a 16-byte (8 instruction) boundary - when this happens we only issue instructions after the target&lt;/li&gt;
+  &lt;li&gt;when the BTC make a micro-misprediction we sometimes lose a clock (and up to 8 instructions) retrying the icache fetch&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;And indeed measurement of instruction use rates on VRoom! (again on the still useful dhrystone - which currently does almost perfect branch prediction) we measure 3.68 instructions/128-bit instruction bundle - on average less than 4 instructions being issued per clock to the core. Of course every instruction stream is different - we look both at largish benchmark streams and drill down into particular hot spots looking to understand low level issues.&lt;/p&gt;
+
+&lt;p&gt;There is also another an issue for tight loops - imagine something like this looking for the null at the end of a string:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;loop:
+	ldb	a0, (a1)
+	add	a1, a1, 1
+	bne	a0, loop
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;our current execution core can issue up to 4 loads per clock and execute 3 add/branch instructions per clock - theoretical it should be able to speculatively go 3 times around this loop every 2 clocks - if only it can be fed from the instruction stream quickly enough (9 instructions every 2 clocks), but in this case the current fetch/decode logic is limited to 3 instructions per clock (or per 128-bit bundle) - it might even be less (3 instructions every 2 clocks) if the instructions happen to straddle a 128-bit bundle boundary.&lt;/p&gt;
+
+&lt;p&gt;So a trace cache allows us to record ‘traces’ of instructions - streams of decoded consecutive instructions from the
+system and then consistently play them back at the full rate so that the core can execute them without the limitations placed on them by the decoder, instruction cache, and the alignment of instructions within an instruction stream.&lt;/p&gt;
+
+&lt;p&gt;A trace cache is an interesting beast - when it hits it replaces not only the instruction cache but also part of the branch target cache - and there’s likely some interesting interactions between the BTC and the trace cache.&lt;/p&gt;
+
+&lt;p&gt;A trace cache hit returns N consecutive instructions (not necessarily consecutive in memory, but consecutive within the instruction stream) along with the PC of the instruction to execute following the last instruction in the trace that’s returned. On VRoom! we don’t ‘execute’ unconditional branches, they’re handled solely in the
+fetch unit so they don’t find their way into the execution pipe or the trace cache - the ‘next’ address of
+an instruction might be the address the branch after it jumped to - so this loop:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;loop:	bne     a1, done
+        add     a1, a1, -1
+	j	loop
+done:
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;results in only 2 instructions in the commitQ instruction stream and 2 instructions per loop in a trace cache.&lt;/p&gt;
+
+&lt;h3 id=&quot;implementation&quot;&gt;Implementation&lt;/h3&gt;
+
+&lt;p&gt;Each instruction from VRoom!s decoders is represented by a roughly 160-bit bundle (registers, PC, decoded opcode, functional unit number, predicted branch destination, immediate value etc) - after renaming (matching registers to the commitQ entry that will produce their values) the renamed instructions are entered as a block into the commitQ.&lt;/p&gt;
+
+&lt;p&gt;The commitQ is an ordered list of instructions to be out-of-order and speculatively executed - because of branch mispredictions, traps/faults, TLB misses etc an instruction may or may not reach the far end of the commitQ, where it will be ‘committed’ (ie will update the architectural state - writes to memory will actually happen, register updates will be committed to the architecturally visible register file etc).&lt;/p&gt;
+
+&lt;p&gt;The commit end of the commitQ can currently commit up to 8 instructions per clock (essentially we need a number here that is higher than our target IPC so that we can burst where possible - - it’s strongly related to the number of write ports into the architectural register file) - it regularly achieves 8 instructions per clock, but on average it’s more like 2-3 instructions per clock (it’s how we measure our system IPC)
+one of our main goals with VRoom! is to increase this number to something more like 4 IPC - of course it’s going to be 
+different on each instruction stream.&lt;/p&gt;
+
+&lt;p&gt;So let’s look at how a trace cache (I$0 - 0th level instruction cache) fits into our system&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/trace1.svg&quot; alt=&quot;placeholder&quot; title=&quot;Target Cache example&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Red arrows are control signals, black ones are instruction bundles, blue ones register access.&lt;/p&gt;
+
+&lt;p&gt;Note that the trace cache is filled from the portion of the commitQ containing committed instructions, on
+every clock it will be filled with 0-8 instructions. On the fetch side data is read up to 8 at a time and replaces data from the decoders into the rename unit.&lt;/p&gt;
+
+&lt;p&gt;The fetch side of things is managed by the PC (program counter) unit, on every clock it fetches from the normal instruction cache and the trace cache in parallel, if it hits in the trace cache the instruction cache data is discarded. If the decode unit is currently busy (from the previous fetch) the PC has to wait a
+clock before allowing the trace cache data be used (to allow the decode instructions to be renamed),
+subsequent trace cache data can be dispatched on the every clock. Because we fetch instruction cache data
+in parallel with trace cache data switching back causes a 1 clock (decode time) penalty. Some of the times we
+gain a clock - for example when when we take a branch misprediction, the pipe will start one clock more quickly if the new branch target is in the trace cache.&lt;/p&gt;
+
+&lt;p&gt;Normally the PC uses BTC information, or information from the decoder to choose what the next PC fetch will be - on a trace cache hit we use the next PC value from the trace cache instead.&lt;/p&gt;
+
+&lt;h3 id=&quot;initial-trace-cache-implementation&quot;&gt;Initial Trace Cache Implementation&lt;/h3&gt;
+
+&lt;p&gt;This is all still very much a work in process, here’s a brief description of our initial implementation, it’s not good enough
+yet, but the basic connection described above probably wont change.&lt;/p&gt;
+
+&lt;p&gt;This initial implementation consists of N traces each containing 8 instructions (~1k bits per trace) - on the read side they act as a fully associative cache - so N can be any value, doesn’t have to be a power of 2, we’re starting with N=64, a number pulled out of thin air.&lt;/p&gt;
+
+&lt;p&gt;Each trace has the following metadata:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;PC of the first entry (tag for associative lookup)&lt;/li&gt;
+  &lt;li&gt;next PC of the last entry in the trace&lt;/li&gt;
+  &lt;li&gt;bit mask describing which instruction entries in the trace are valid (the first M will be set)&lt;/li&gt;
+  &lt;li&gt;use tag - a pinned counter - incremented on each valid access, decremented every P CPU clocks, a trace entry with a use tag of 0 can be stolen&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In general some other CPU’s trace cache implementations have much larger trace entries (far more than 8) - our implementation is
+an attempt to create a system that will self assemble larger trace lines out of the smaller 8 instruction chunks - this part is still a work in progress.&lt;/p&gt;
+
+&lt;p&gt;Internally the current implementation looks like this:&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/trace2.svg&quot; alt=&quot;placeholder&quot; title=&quot;Target Cache internals&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;The fetch interface is described above, the Commit side interface has to handle unaligned incoming data - for example imagine on clock N we get 4 instructions and on clock N+1 we get 8 - we want to be able to write 4 in clock N, 4 more into the same line on clock N+1 and the final 4 instructions into a new line at clock N+1. For this reason there’s a temporary holding buffer “waiting” that holds data and allows us to share a single write port.  In essence there’s a single write port with a shift mux and a holding register in its input.&lt;/p&gt;
+
+&lt;p&gt;There are two pointers to trace lines:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;“Last” which points to the last line written (in case we want to add more data to the end of it)&lt;/li&gt;
+  &lt;li&gt;“Next” which will be the next line we can write to (if one is available) - this is calculated using the “use tag” metadata a clock ahead&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;During operation fresh data line goes into Next at which time Last become Next - new data that is in the same trace and fits into the trace pointed to by Last goes there, skipping any input invalidates Last.&lt;/p&gt;
+
+&lt;h3 id=&quot;performance&quot;&gt;Performance&lt;/h3&gt;
+
+&lt;p&gt;So the above design works, passes our CPU sanity tests (there were lots of interesting bugs around interrupts) however the performance is meh - it’s a little slower than the existing non-trace-cache model which obviously isn’t good enough.&lt;/p&gt;
+
+&lt;p&gt;Why? mostly it seems that the current mechanism for choosing traces is too simple,
+it’s greedy and it grabs any trace when there is space available - we do start traces at jump targets but that’s about it.&lt;/p&gt;
+
+&lt;p&gt;A particular problem is that we happily collect traces across subroutine calls and returns - this results in
+branch mispredictions and confuses the branch target cache. Another issue is that we are collecting
+the same data over and over again essentially in different phases (at different offsets) within
+different trace entries which limits the effective size of the trace cache.&lt;/p&gt;
+
+&lt;p&gt;So the next plan is to work with the existing working design but modifying the criteria for when traces are started and when they finish - initially making sure that they end at instruction calls and returns, and then some smarts around looping, perhaps limiting trace length.&lt;/p&gt;
+
+&lt;h3 id=&quot;conclusion&quot;&gt;Conclusion&lt;/h3&gt;
+
+&lt;p&gt;Our basic trace cache design seems to be vaguely functional, but doesn’t perform well - originally we’d hoped for a 1.5-2x boost - we think this is still possible - watch this space in a month or so.&lt;/p&gt;
+
+&lt;p&gt;Next time: Trace cache - Part 2&lt;/p&gt;
+</content>
+ </entry>
  
  <entry>
    <title>VRoom! blog&#58; Combining ALUs and Branch Units</title>

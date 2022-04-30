@@ -1,0 +1,1200 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="4.2.1">Jekyll</generator><link href="http://localhost:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/" rel="alternate" type="text/html" /><updated>2022-05-01T11:48:31+12:00</updated><id>http://localhost:4000/feed.xml</id><title type="html">VRoom!</title><subtitle>Very high end RISC-V implementation, cloud server class, out of order, super scalar, speculative, up to 8 IPC</subtitle><author><name>Paul Campbell</name></author><entry><title type="html">VRoom! blog: Trace cache - Part 1</title><link href="http://localhost:4000/2022/04/30/trace-part1/" rel="alternate" type="text/html" title="VRoom! blog: Trace cache - Part 1" /><published>2022-04-30T00:00:00+12:00</published><updated>2022-04-30T00:00:00+12:00</updated><id>http://localhost:4000/2022/04/30/trace-part1</id><content type="html" xml:base="http://localhost:4000/2022/04/30/trace-part1/"><![CDATA[<h3 id="introduction">Introduction</h3>
+
+<p>I’ve spent the past month working on adding a trace cache to VRoom! - it’s not done yet but is mildly
+functional. Here’s a quick write up of what I’ve done so far.</p>
+
+<h3 id="what-is-a-trace-cache">What is a Trace cache?</h3>
+
+<p>Essentially a trace cache is an instruction cache of already decoded instructions. On a CISC CPU like an Intel/AMD x86 it might contain RISC-like micro-operations decoded from complicated CISC instructions.</p>
+
+<p>On VRoom! we have an instruction decode that every clock can decode 4 32-bit instructions, 8 16-bit instructions, or some mixture of the two from an 128-bit bundle fetched from the L1 instruction cache. Theoretically we can feed our CPU’s core (the renamer onwards) with 8 instructions on every clock, but in reality we seldom do. There are four main reasons why:</p>
+
+<ul>
+  <li>we can only get 8 instructions per clock through the decoder if they are all 16-bit instructions - most instruction streams are a mix of both 16-bit and 32-bit instructions</li>
+  <li>there’s a very rough rule of thumb from computer architecture in general that says that about every 5th instruction is a branch - with potentially 8 instructions per icache fetch that means that (very roughly) on average only 5 of them get executed</li>
+  <li>branch targets are not always on a 16-byte (8 instruction) boundary - when this happens we only issue instructions after the target</li>
+  <li>when the BTC make a micro-misprediction we sometimes lose a clock (and up to 8 instructions) retrying the icache fetch</li>
+</ul>
+
+<p>And indeed measurement of instruction use rates on VRoom! (again on the still useful dhrystone - which currently does almost perfect branch prediction) we measure 3.68 instructions/128-bit instruction bundle - on average less than 4 instructions being issued per clock to the core. Of course every instruction stream is different - we look both at largish benchmark streams and drill down into particular hot spots looking to understand low level issues.</p>
+
+<p>There is also another an issue for tight loops - imagine something like this looking for the null at the end of a string:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>loop:
+	ldb	a0, (a1)
+	add	a1, a1, 1
+	bne	a0, loop
+</code></pre></div></div>
+
+<p>our current execution core can issue up to 4 loads per clock and execute 3 add/branch instructions per clock - theoretical it should be able to speculatively go 3 times around this loop every 2 clocks - if only it can be fed from the instruction stream quickly enough (9 instructions every 2 clocks), but in this case the current fetch/decode logic is limited to 3 instructions per clock (or per 128-bit bundle) - it might even be less (3 instructions every 2 clocks) if the instructions happen to straddle a 128-bit bundle boundary.</p>
+
+<p>So a trace cache allows us to record ‘traces’ of instructions - streams of decoded consecutive instructions from the
+system and then consistently play them back at the full rate so that the core can execute them without the limitations placed on them by the decoder, instruction cache, and the alignment of instructions within an instruction stream.</p>
+
+<p>A trace cache is an interesting beast - when it hits it replaces not only the instruction cache but also part of the branch target cache - and there’s likely some interesting interactions between the BTC and the trace cache.</p>
+
+<p>A trace cache hit returns N consecutive instructions (not necessarily consecutive in memory, but consecutive within the instruction stream) along with the PC of the instruction to execute following the last instruction in the trace that’s returned. On VRoom! we don’t ‘execute’ unconditional branches, they’re handled solely in the
+fetch unit so they don’t find their way into the execution pipe or the trace cache - the ‘next’ address of
+an instruction might be the address the branch after it jumped to - so this loop:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>loop:	bne     a1, done
+        add     a1, a1, -1
+	j	loop
+done:
+</code></pre></div></div>
+
+<p>results in only 2 instructions in the commitQ instruction stream and 2 instructions per loop in a trace cache.</p>
+
+<h3 id="implementation">Implementation</h3>
+
+<p>Each instruction from VRoom!s decoders is represented by a roughly 160-bit bundle (registers, PC, decoded opcode, functional unit number, predicted branch destination, immediate value etc) - after renaming (matching registers to the commitQ entry that will produce their values) the renamed instructions are entered as a block into the commitQ.</p>
+
+<p>The commitQ is an ordered list of instructions to be out-of-order and speculatively executed - because of branch mispredictions, traps/faults, TLB misses etc an instruction may or may not reach the far end of the commitQ, where it will be ‘committed’ (ie will update the architectural state - writes to memory will actually happen, register updates will be committed to the architecturally visible register file etc).</p>
+
+<p>The commit end of the commitQ can currently commit up to 8 instructions per clock (essentially we need a number here that is higher than our target IPC so that we can burst where possible - - it’s strongly related to the number of write ports into the architectural register file) - it regularly achieves 8 instructions per clock, but on average it’s more like 2-3 instructions per clock (it’s how we measure our system IPC)
+one of our main goals with VRoom! is to increase this number to something more like 4 IPC - of course it’s going to be 
+different on each instruction stream.</p>
+
+<p>So let’s look at how a trace cache (I$0 - 0th level instruction cache) fits into our system</p>
+
+<p><img src="/public/images/trace1.svg" alt="placeholder" title="Target Cache example" /></p>
+
+<p>Red arrows are control signals, black ones are instruction bundles, blue ones register access.</p>
+
+<p>Note that the trace cache is filled from the portion of the commitQ containing committed instructions, on
+every clock it will be filled with 0-8 instructions. On the fetch side data is read up to 8 at a time and replaces data from the decoders into the rename unit.</p>
+
+<p>The fetch side of things is managed by the PC (program counter) unit, on every clock it fetches from the normal instruction cache and the trace cache in parallel, if it hits in the trace cache the instruction cache data is discarded. If the decode unit is currently busy (from the previous fetch) the PC has to wait a
+clock before allowing the trace cache data be used (to allow the decode instructions to be renamed),
+subsequent trace cache data can be dispatched on the every clock. Because we fetch instruction cache data
+in parallel with trace cache data switching back causes a 1 clock (decode time) penalty. Some of the times we
+gain a clock - for example when when we take a branch misprediction, the pipe will start one clock more quickly if the new branch target is in the trace cache.</p>
+
+<p>Normally the PC uses BTC information, or information from the decoder to choose what the next PC fetch will be - on a trace cache hit we use the next PC value from the trace cache instead.</p>
+
+<h3 id="initial-trace-cache-implementation">Initial Trace Cache Implementation</h3>
+
+<p>This is all still very much a work in process, here’s a brief description of our initial implementation, it’s not good enough
+yet, but the basic connection described above probably wont change.</p>
+
+<p>This initial implementation consists of N traces each containing 8 instructions (~1k bits per trace) - on the read side they act as a fully associative cache - so N can be any value, doesn’t have to be a power of 2, we’re starting with N=64, a number pulled out of thin air.</p>
+
+<p>Each trace has the following metadata:</p>
+
+<ul>
+  <li>PC of the first entry (tag for associative lookup)</li>
+  <li>next PC of the last entry in the trace</li>
+  <li>bit mask describing which instruction entries in the trace are valid (the first M will be set)</li>
+  <li>use tag - a pinned counter - incremented on each valid access, decremented every P CPU clocks, a trace entry with a use tag of 0 can be stolen</li>
+</ul>
+
+<p>In general some other CPU’s trace cache implementations have much larger trace entries (far more than 8) - our implementation is
+an attempt to create a system that will self assemble larger trace lines out of the smaller 8 instruction chunks - this part is still a work in progress.</p>
+
+<p>Internally the current implementation looks like this:</p>
+
+<p><img src="/public/images/trace2.svg" alt="placeholder" title="Target Cache internals" /></p>
+
+<p>The fetch interface is described above, the Commit side interface has to handle unaligned incoming data - for example imagine on clock N we get 4 instructions and on clock N+1 we get 8 - we want to be able to write 4 in clock N, 4 more into the same line on clock N+1 and the final 4 instructions into a new line at clock N+1. For this reason there’s a temporary holding buffer “waiting” that holds data and allows us to share a single write port.  In essence there’s a single write port with a shift mux and a holding register in its input.</p>
+
+<p>There are two pointers to trace lines:</p>
+<ul>
+  <li>“Last” which points to the last line written (in case we want to add more data to the end of it)</li>
+  <li>“Next” which will be the next line we can write to (if one is available) - this is calculated using the “use tag” metadata a clock ahead</li>
+</ul>
+
+<p>During operation fresh data line goes into Next at which time Last become Next - new data that is in the same trace and fits into the trace pointed to by Last goes there, skipping any input invalidates Last.</p>
+
+<h3 id="performance">Performance</h3>
+
+<p>So the above design works, passes our CPU sanity tests (there were lots of interesting bugs around interrupts) however the performance is meh - it’s a little slower than the existing non-trace-cache model which obviously isn’t good enough.</p>
+
+<p>Why? mostly it seems that the current mechanism for choosing traces is too simple,
+it’s greedy and it grabs any trace when there is space available - we do start traces at jump targets but that’s about it.</p>
+
+<p>A particular problem is that we happily collect traces across subroutine calls and returns - this results in
+branch mispredictions and confuses the branch target cache. Another issue is that we are collecting
+the same data over and over again essentially in different phases (at different offsets) within
+different trace entries which limits the effective size of the trace cache.</p>
+
+<p>So the next plan is to work with the existing working design but modifying the criteria for when traces are started and when they finish - initially making sure that they end at instruction calls and returns, and then some smarts around looping, perhaps limiting trace length.</p>
+
+<h3 id="conclusion">Conclusion</h3>
+
+<p>Our basic trace cache design seems to be vaguely functional, but doesn’t perform well - originally we’d hoped for a 1.5-2x boost - we think this is still possible - watch this space in a month or so.</p>
+
+<p>Next time: Trace cache - Part 2</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[Introduction I’ve spent the past month working on adding a trace cache to VRoom! - it’s not done yet but is mildly functional. Here’s a quick write up of what I’ve done so far. What is a Trace cache? Essentially a trace cache is an instruction cache of already decoded instructions. On a CISC CPU like an Intel/AMD x86 it might contain RISC-like micro-operations decoded from complicated CISC instructions. On VRoom! we have an instruction decode that every clock can decode 4 32-bit instructions, 8 16-bit instructions, or some mixture of the two from an 128-bit bundle fetched from the L1 instruction cache. Theoretically we can feed our CPU’s core (the renamer onwards) with 8 instructions on every clock, but in reality we seldom do. There are four main reasons why: we can only get 8 instructions per clock through the decoder if they are all 16-bit instructions - most instruction streams are a mix of both 16-bit and 32-bit instructions there’s a very rough rule of thumb from computer architecture in general that says that about every 5th instruction is a branch - with potentially 8 instructions per icache fetch that means that (very roughly) on average only 5 of them get executed branch targets are not always on a 16-byte (8 instruction) boundary - when this happens we only issue instructions after the target when the BTC make a micro-misprediction we sometimes lose a clock (and up to 8 instructions) retrying the icache fetch And indeed measurement of instruction use rates on VRoom! (again on the still useful dhrystone - which currently does almost perfect branch prediction) we measure 3.68 instructions/128-bit instruction bundle - on average less than 4 instructions being issued per clock to the core. Of course every instruction stream is different - we look both at largish benchmark streams and drill down into particular hot spots looking to understand low level issues. There is also another an issue for tight loops - imagine something like this looking for the null at the end of a string: loop: ldb a0, (a1) add a1, a1, 1 bne a0, loop our current execution core can issue up to 4 loads per clock and execute 3 add/branch instructions per clock - theoretical it should be able to speculatively go 3 times around this loop every 2 clocks - if only it can be fed from the instruction stream quickly enough (9 instructions every 2 clocks), but in this case the current fetch/decode logic is limited to 3 instructions per clock (or per 128-bit bundle) - it might even be less (3 instructions every 2 clocks) if the instructions happen to straddle a 128-bit bundle boundary. So a trace cache allows us to record ‘traces’ of instructions - streams of decoded consecutive instructions from the system and then consistently play them back at the full rate so that the core can execute them without the limitations placed on them by the decoder, instruction cache, and the alignment of instructions within an instruction stream. A trace cache is an interesting beast - when it hits it replaces not only the instruction cache but also part of the branch target cache - and there’s likely some interesting interactions between the BTC and the trace cache. A trace cache hit returns N consecutive instructions (not necessarily consecutive in memory, but consecutive within the instruction stream) along with the PC of the instruction to execute following the last instruction in the trace that’s returned. On VRoom! we don’t ‘execute’ unconditional branches, they’re handled solely in the fetch unit so they don’t find their way into the execution pipe or the trace cache - the ‘next’ address of an instruction might be the address the branch after it jumped to - so this loop: loop: bne a1, done add a1, a1, -1 j loop done: results in only 2 instructions in the commitQ instruction stream and 2 instructions per loop in a trace cache. Implementation Each instruction from VRoom!s decoders is represented by a roughly 160-bit bundle (registers, PC, decoded opcode, functional unit number, predicted branch destination, immediate value etc) - after renaming (matching registers to the commitQ entry that will produce their values) the renamed instructions are entered as a block into the commitQ. The commitQ is an ordered list of instructions to be out-of-order and speculatively executed - because of branch mispredictions, traps/faults, TLB misses etc an instruction may or may not reach the far end of the commitQ, where it will be ‘committed’ (ie will update the architectural state - writes to memory will actually happen, register updates will be committed to the architecturally visible register file etc). The commit end of the commitQ can currently commit up to 8 instructions per clock (essentially we need a number here that is higher than our target IPC so that we can burst where possible - - it’s strongly related to the number of write ports into the architectural register file) - it regularly achieves 8 instructions per clock, but on average it’s more like 2-3 instructions per clock (it’s how we measure our system IPC) one of our main goals with VRoom! is to increase this number to something more like 4 IPC - of course it’s going to be different on each instruction stream. So let’s look at how a trace cache (I$0 - 0th level instruction cache) fits into our system Red arrows are control signals, black ones are instruction bundles, blue ones register access. Note that the trace cache is filled from the portion of the commitQ containing committed instructions, on every clock it will be filled with 0-8 instructions. On the fetch side data is read up to 8 at a time and replaces data from the decoders into the rename unit. The fetch side of things is managed by the PC (program counter) unit, on every clock it fetches from the normal instruction cache and the trace cache in parallel, if it hits in the trace cache the instruction cache data is discarded. If the decode unit is currently busy (from the previous fetch) the PC has to wait a clock before allowing the trace cache data be used (to allow the decode instructions to be renamed), subsequent trace cache data can be dispatched on the every clock. Because we fetch instruction cache data in parallel with trace cache data switching back causes a 1 clock (decode time) penalty. Some of the times we gain a clock - for example when when we take a branch misprediction, the pipe will start one clock more quickly if the new branch target is in the trace cache. Normally the PC uses BTC information, or information from the decoder to choose what the next PC fetch will be - on a trace cache hit we use the next PC value from the trace cache instead. Initial Trace Cache Implementation This is all still very much a work in process, here’s a brief description of our initial implementation, it’s not good enough yet, but the basic connection described above probably wont change. This initial implementation consists of N traces each containing 8 instructions (~1k bits per trace) - on the read side they act as a fully associative cache - so N can be any value, doesn’t have to be a power of 2, we’re starting with N=64, a number pulled out of thin air. Each trace has the following metadata: PC of the first entry (tag for associative lookup) next PC of the last entry in the trace bit mask describing which instruction entries in the trace are valid (the first M will be set) use tag - a pinned counter - incremented on each valid access, decremented every P CPU clocks, a trace entry with a use tag of 0 can be stolen In general some other CPU’s trace cache implementations have much larger trace entries (far more than 8) - our implementation is an attempt to create a system that will self assemble larger trace lines out of the smaller 8 instruction chunks - this part is still a work in progress. Internally the current implementation looks like this: The fetch interface is described above, the Commit side interface has to handle unaligned incoming data - for example imagine on clock N we get 4 instructions and on clock N+1 we get 8 - we want to be able to write 4 in clock N, 4 more into the same line on clock N+1 and the final 4 instructions into a new line at clock N+1. For this reason there’s a temporary holding buffer “waiting” that holds data and allows us to share a single write port. In essence there’s a single write port with a shift mux and a holding register in its input. There are two pointers to trace lines: “Last” which points to the last line written (in case we want to add more data to the end of it) “Next” which will be the next line we can write to (if one is available) - this is calculated using the “use tag” metadata a clock ahead During operation fresh data line goes into Next at which time Last become Next - new data that is in the same trace and fits into the trace pointed to by Last goes there, skipping any input invalidates Last. Performance So the above design works, passes our CPU sanity tests (there were lots of interesting bugs around interrupts) however the performance is meh - it’s a little slower than the existing non-trace-cache model which obviously isn’t good enough. Why? mostly it seems that the current mechanism for choosing traces is too simple, it’s greedy and it grabs any trace when there is space available - we do start traces at jump targets but that’s about it. A particular problem is that we happily collect traces across subroutine calls and returns - this results in branch mispredictions and confuses the branch target cache. Another issue is that we are collecting the same data over and over again essentially in different phases (at different offsets) within different trace entries which limits the effective size of the trace cache. So the next plan is to work with the existing working design but modifying the criteria for when traces are started and when they finish - initially making sure that they end at instruction calls and returns, and then some smarts around looping, perhaps limiting trace length. Conclusion Our basic trace cache design seems to be vaguely functional, but doesn’t perform well - originally we’d hoped for a 1.5-2x boost - we think this is still possible - watch this space in a month or so. Next time: Trace cache - Part 2]]></summary></entry><entry><title type="html">VRoom! blog: Combining ALUs and Branch Units</title><link href="http://localhost:4000/2022/03/25/combined-branches/" rel="alternate" type="text/html" title="VRoom! blog: Combining ALUs and Branch Units" /><published>2022-03-25T00:00:00+13:00</published><updated>2022-03-25T00:00:00+13:00</updated><id>http://localhost:4000/2022/03/25/combined-branches</id><content type="html" xml:base="http://localhost:4000/2022/03/25/combined-branches/"><![CDATA[<h3 id="introduction">Introduction</h3>
+
+<p>Wow, this was a fun week <a href="https://news.ycombinator.com/item?id=30755716">VRoom! made it to the front page of HackerNews</a> - for those new here this is an occasional blog post on architectural issues as
+they are investigated - VRoom! is very much a work in progress.</p>
+
+<p>This particular blog entry is about a recent exploration around the way that we handle branches
+and ALUs.</p>
+
+<h3 id="branch-units-vs-alu-units">Branch units vs ALU units</h3>
+
+<p>The current design has 1 branch unit per hart (a ‘hart’ is essentially a RISCV CPU
+context - an N-way simultaneous multi-threaded machine has N harts even if they share
+memory interfaces, caches and ALUs). It also has M ALUs - currently two.</p>
+
+<p>After a lot of thinking about branch units and ALU units it seemed that they have a lot in
+common - both have a 64-bit adder/subtracter in their core, and use 2 register read ports and
+a write port. Branch units only use the write port for call instructions - some branches, unconditional
+relative branches don’t actually hit the commitQ at all, conditional branches simply check that the
+predicted destination is correct, if so they become an effective no-op, otherwise they
+trigger a commitQ flush and a BTC miss.</p>
+
+<p>So we’ve made some changes to the design to be able to optionally make a combined ALU/branch unit,
+and to be able to build the system with those instead of the existing independent branch and ALUs units
+(it’s a Makefile option so relatively easy to change). Running a bunch of tests on our still
+useful Dhrystone we get:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: left">Branch</th>
+      <th style="text-align: left">ALU</th>
+      <th style="text-align: left">Combined</th>
+      <th style="text-align: left">DMips/MHz</th>
+      <th style="text-align: left">Area</th>
+      <th style="text-align: left">Register Ports</th>
+      <th> </th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: left">1</td>
+      <td style="text-align: left">2</td>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">6.33</td>
+      <td style="text-align: left">3x</td>
+      <td style="text-align: left">6/3</td>
+      <td>2022-03-25-combined-branches.md</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">2</td>
+      <td style="text-align: left">6.14</td>
+      <td style="text-align: left">2x</td>
+      <td style="text-align: left">4/2</td>
+      <td> </td>
+    </tr>
+    <tr>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">3</td>
+      <td style="text-align: left">6.49</td>
+      <td style="text-align: left">3x</td>
+      <td style="text-align: left">6/3</td>
+      <td> </td>
+    </tr>
+    <tr>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">0</td>
+      <td style="text-align: left">4</td>
+      <td style="text-align: left">6.49</td>
+      <td style="text-align: left">4x</td>
+      <td style="text-align: left">8/4</td>
+      <td> </td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Which is interesting - 3 combined Branch/ALU units outperform the existing 1 Branch/2 ALU with
+roughly the same area/register file ports. So we’ll keep that.</p>
+
+<p>It’s also interesting that 4 combined ALUs performs exactly the same as the 3 ALU system (to the clock) even
+though the 4th ALU gets scheduled about 1/12 of the time - essentially this is because because we’re scheduling ALUs
+out of order (and speculatively) the 3rd ALU happily takes on that extra work without changing how fast the
+final instructions get retired.</p>
+
+<p>One other interesting thing here, and the likely reason for much of this performance improvement is
+that we can now retire multiple branches per clock - we need to be able to do something sensible if
+multiple branches fail branch prediction in the same clock - the correct solution is to give priority
+to the misprediction closest to the end of the pipe (since the earlier instruction should cause the later one
+to be flushed from the pipe).</p>
+
+<p>What’s also interesting is: what would happen if we build a 2-hart SMT machine? previously such a system
+would have had 2 branch units and 2 ALUs - looking at current simulations a CPU is keeping 1 ALU busy
+close to 90%, the second to ~50%, the 3rd ~20% - while we don’t have any good simulation data yet we
+can guess that 4 combined ALUs (so about the same area) would likely satisfy a dual SMT system - mostly
+because the 2 threads
+would share I/Dcaches and as a result run a little more slowly (add that to the list of future
+experiments).</p>
+
+<h3 id="vroom-go-boom">VRoom! go Boom!</h3>
+
+<p>Scheduling N units is difficult - essentially we need to look at all the entries in the commitQ and
+choose the one closest to the end of the pipe ready to perform an ALU operation on ALU 0. That’s easy
+the core of it looks something a bit like this (for an 8 entry Q):</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*)
+casez (req) 
+8'b???????1: begin alu0_enable = 1; alu0_rd = 0; end
+8'b??????10: begin alu0_enable = 1; alu0_rd = 1; end
+8'b?????100: begin alu0_enable = 1; alu0_rd = 2; end
+.....
+8'b10000000: begin alu0_enable = 1; alu0_rd = 7; end
+8'b00000000: alu0_enable = 0;
+endcase
+</code></pre></div></div>
+
+<p>for ALU 1 it looks like (answering the question: what is the 2nd bit if 2 or more bits are set):</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*)
+casez (req) 
+8'b??????11: begin alu1_enable = 1; alu1_rd = 1; end
+8'b?????101,
+8'b?????110: begin alu1_enable = 1; alu1_rd = 2; end
+8'b????1001,
+8'b????1010,
+8'b????1100: begin alu1_enable = 1; alu1_rd = 3; end
+.....
+8'b00000000: alu1_enable = 0;
+endcase
+</code></pre></div></div>
+
+<p>For more ALUs it gets more complex for a 3264 entry commitQ it’s also much bigger, for dual
+SMT systems there are 2 commitQs so 64/128 entries (we interleave the request bits from the
+two commitQs to give them fair access to the resources).</p>
+
+<p>Simply listing all the bit combinations with 3 bits set out of 128 bits in a case statement
+just listing all of them gets unruly - but really we do want to express this in a manner
+where we can provide a maximum amount of parallelism to the synthesis tools we’re using, hopefully
+they’ll find optimizations that are not obvious - so long ago we had reformulated it
+to something like this:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*)
+casez (req) 
+8'b???????1: begin alu0_enable = 1; alu0_rd = 0;
+		casez (req[7:1]) 
+		7'b??????1: begin alu1_enable = 1; alu1_rd = 1; end
+		7'b?????10: begin alu1_enable = 1; alu1_rd = 2; end
+		7'b????100: begin alu1_enable = 1; alu1_rd = 3; end
+		.....
+		7'b1000000: begin alu1_enable = 1; alu1_rd = 7; end
+		7'b0000000: alu1_enable = 0;
+		endcase
+	     end
+8'b??????10: begin alu0_enable = 1; alu0_rd = 1; 
+		casez (req[7:2]) 
+		6'b?????1: begin alu1_enable = 1; alu1_rd = 2; end
+		6'b????10: begin alu1_enable = 1; alu1_rd = 3; end
+		6'b???100: begin alu1_enable = 1; alu1_rd = 4; end
+		.....
+		6'b100000: begin alu1_enable = 1; alu1_rd = 7; end
+		6'b000000: alu1_enable = 0;
+		endcase
+	     end
+8'b?????100: begin alu0_enable = 1; alu0_rd = 2; 
+.....
+8'b10000000: begin alu0_enable = 1; alu0_rd = 7; alu1_enable = 0; end
+8'b00000000: begin alu0_enable = 0; alu1_enable = 0; end
+endcase
+</code></pre></div></div>
+
+<p>etc etc we have C code that will spit this out for an arbitrary number of ALUs (arbitrary depths)
+the 2 ALU scheduler for a 32 entry commitQ happily compiles under verilator/iverilog and on
+Vivado (yosys currently goes bang! we suspect upset by this combinatorial explosion). When we switched
+to 3 ALUs (we tried this a while ago) it happily compiled on verilator (takes a while) and runs. When
+we compiled up the 4 ALU scheduler on verilator it went Bang! the kernel OOM killer got it (on a
+96Gb laptop) - looking at the machine generated code it was 200K lines of verilog …. oops … 3 ALUs
+was compiling 50k, 2 ALUs ~10k …. serious combinatorial explosion!</p>
+
+<p>Luckily we’d already found another way to solve this problem elsewhere (we have 6! address units)
+so dropping some other code in to generate this scheduler wasn’t hard (900 lines rather than 200k) -
+we’re going to need to
+spend some time looking at how well this new code performs, it had always been expected to be
+one of the more difficult areas for timing - we might need to find some 95% heuristics here that are
+not perfect but allow us higher core clock speeds - time will tell. Sadly Yosys still goes bang, must be something else.</p>
+
+<h3 id="conclusion">Conclusion</h3>
+
+<p>Combined branch ALUs seem to provide a performance improvement with little increase in area - we’ll
+keep them.</p>
+
+<p>Next time: Probably something about trace caches, might take a while</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[Introduction Wow, this was a fun week VRoom! made it to the front page of HackerNews - for those new here this is an occasional blog post on architectural issues as they are investigated - VRoom! is very much a work in progress. This particular blog entry is about a recent exploration around the way that we handle branches and ALUs. Branch units vs ALU units The current design has 1 branch unit per hart (a ‘hart’ is essentially a RISCV CPU context - an N-way simultaneous multi-threaded machine has N harts even if they share memory interfaces, caches and ALUs). It also has M ALUs - currently two. After a lot of thinking about branch units and ALU units it seemed that they have a lot in common - both have a 64-bit adder/subtracter in their core, and use 2 register read ports and a write port. Branch units only use the write port for call instructions - some branches, unconditional relative branches don’t actually hit the commitQ at all, conditional branches simply check that the predicted destination is correct, if so they become an effective no-op, otherwise they trigger a commitQ flush and a BTC miss. So we’ve made some changes to the design to be able to optionally make a combined ALU/branch unit, and to be able to build the system with those instead of the existing independent branch and ALUs units (it’s a Makefile option so relatively easy to change). Running a bunch of tests on our still useful Dhrystone we get: Branch ALU Combined DMips/MHz Area Register Ports   1 2 0 6.33 3x 6/3 2022-03-25-combined-branches.md 0 0 2 6.14 2x 4/2   0 0 3 6.49 3x 6/3   0 0 4 6.49 4x 8/4   Which is interesting - 3 combined Branch/ALU units outperform the existing 1 Branch/2 ALU with roughly the same area/register file ports. So we’ll keep that. It’s also interesting that 4 combined ALUs performs exactly the same as the 3 ALU system (to the clock) even though the 4th ALU gets scheduled about 1/12 of the time - essentially this is because because we’re scheduling ALUs out of order (and speculatively) the 3rd ALU happily takes on that extra work without changing how fast the final instructions get retired. One other interesting thing here, and the likely reason for much of this performance improvement is that we can now retire multiple branches per clock - we need to be able to do something sensible if multiple branches fail branch prediction in the same clock - the correct solution is to give priority to the misprediction closest to the end of the pipe (since the earlier instruction should cause the later one to be flushed from the pipe). What’s also interesting is: what would happen if we build a 2-hart SMT machine? previously such a system would have had 2 branch units and 2 ALUs - looking at current simulations a CPU is keeping 1 ALU busy close to 90%, the second to ~50%, the 3rd ~20% - while we don’t have any good simulation data yet we can guess that 4 combined ALUs (so about the same area) would likely satisfy a dual SMT system - mostly because the 2 threads would share I/Dcaches and as a result run a little more slowly (add that to the list of future experiments). VRoom! go Boom! Scheduling N units is difficult - essentially we need to look at all the entries in the commitQ and choose the one closest to the end of the pipe ready to perform an ALU operation on ALU 0. That’s easy the core of it looks something a bit like this (for an 8 entry Q): always @(*) casez (req) 8'b???????1: begin alu0_enable = 1; alu0_rd = 0; end 8'b??????10: begin alu0_enable = 1; alu0_rd = 1; end 8'b?????100: begin alu0_enable = 1; alu0_rd = 2; end ..... 8'b10000000: begin alu0_enable = 1; alu0_rd = 7; end 8'b00000000: alu0_enable = 0; endcase for ALU 1 it looks like (answering the question: what is the 2nd bit if 2 or more bits are set): always @(*) casez (req) 8'b??????11: begin alu1_enable = 1; alu1_rd = 1; end 8'b?????101, 8'b?????110: begin alu1_enable = 1; alu1_rd = 2; end 8'b????1001, 8'b????1010, 8'b????1100: begin alu1_enable = 1; alu1_rd = 3; end ..... 8'b00000000: alu1_enable = 0; endcase For more ALUs it gets more complex for a 3264 entry commitQ it’s also much bigger, for dual SMT systems there are 2 commitQs so 64/128 entries (we interleave the request bits from the two commitQs to give them fair access to the resources). Simply listing all the bit combinations with 3 bits set out of 128 bits in a case statement just listing all of them gets unruly - but really we do want to express this in a manner where we can provide a maximum amount of parallelism to the synthesis tools we’re using, hopefully they’ll find optimizations that are not obvious - so long ago we had reformulated it to something like this: always @(*) casez (req) 8'b???????1: begin alu0_enable = 1; alu0_rd = 0; casez (req[7:1]) 7'b??????1: begin alu1_enable = 1; alu1_rd = 1; end 7'b?????10: begin alu1_enable = 1; alu1_rd = 2; end 7'b????100: begin alu1_enable = 1; alu1_rd = 3; end ..... 7'b1000000: begin alu1_enable = 1; alu1_rd = 7; end 7'b0000000: alu1_enable = 0; endcase end 8'b??????10: begin alu0_enable = 1; alu0_rd = 1; casez (req[7:2]) 6'b?????1: begin alu1_enable = 1; alu1_rd = 2; end 6'b????10: begin alu1_enable = 1; alu1_rd = 3; end 6'b???100: begin alu1_enable = 1; alu1_rd = 4; end ..... 6'b100000: begin alu1_enable = 1; alu1_rd = 7; end 6'b000000: alu1_enable = 0; endcase end 8'b?????100: begin alu0_enable = 1; alu0_rd = 2; ..... 8'b10000000: begin alu0_enable = 1; alu0_rd = 7; alu1_enable = 0; end 8'b00000000: begin alu0_enable = 0; alu1_enable = 0; end endcase etc etc we have C code that will spit this out for an arbitrary number of ALUs (arbitrary depths) the 2 ALU scheduler for a 32 entry commitQ happily compiles under verilator/iverilog and on Vivado (yosys currently goes bang! we suspect upset by this combinatorial explosion). When we switched to 3 ALUs (we tried this a while ago) it happily compiled on verilator (takes a while) and runs. When we compiled up the 4 ALU scheduler on verilator it went Bang! the kernel OOM killer got it (on a 96Gb laptop) - looking at the machine generated code it was 200K lines of verilog …. oops … 3 ALUs was compiling 50k, 2 ALUs ~10k …. serious combinatorial explosion! Luckily we’d already found another way to solve this problem elsewhere (we have 6! address units) so dropping some other code in to generate this scheduler wasn’t hard (900 lines rather than 200k) - we’re going to need to spend some time looking at how well this new code performs, it had always been expected to be one of the more difficult areas for timing - we might need to find some 95% heuristics here that are not perfect but allow us higher core clock speeds - time will tell. Sadly Yosys still goes bang, must be something else. Conclusion Combined branch ALUs seem to provide a performance improvement with little increase in area - we’ll keep them. Next time: Probably something about trace caches, might take a while]]></summary></entry><entry><title type="html">VRoom! blog: Verilog changes, new performance numbers</title><link href="http://localhost:4000/2022/03/12/new-verilog/" rel="alternate" type="text/html" title="VRoom! blog: Verilog changes, new performance numbers" /><published>2022-03-12T00:00:00+13:00</published><updated>2022-03-12T00:00:00+13:00</updated><id>http://localhost:4000/2022/03/12/new-verilog</id><content type="html" xml:base="http://localhost:4000/2022/03/12/new-verilog/"><![CDATA[<h3 id="introduction">Introduction</h3>
+
+<p>Not really an architectural posting, more about tooling, skip if it’s not really your thing, also new
+some performance numbers.</p>
+
+<h3 id="new-performance-numbers">New Performance Numbers</h3>
+
+<p>I found the bug in the BTC - mispredicted 4-byte branches that crossed a 16 byte boundary (our
+instruction bundle size) this is now fixed and we have better dhrystone numbers: 6.33 DMIPS/MHz
+at an IPC of 2.51 - better than I expected! We can still do better.</p>
+
+<h3 id="more-system-verilog-interfaces-for-the-mostly-win">More System Verilog, Interfaces for the (mostly) win</h3>
+
+<p>Last week I posted a description about my recent major changes to the way that the load/store
+unit works, what I didn’t touch on is some pretty major changes to the ways the actual Verilog code 
+is written.</p>
+
+<p>I’m an old-time verilog hack, I’ve even written a compiler (actually 2 of them, you can
+thank me for the * in the “always @(*)” construct). Back in the
+90s, I tried to build a cloud biz (before ‘cloud’ was a word) selling time with it for that last
+couple of months when you need zillions of licenses and machines to run them on. Sadly we were
+probably ahead of our time, and we got killed by Enron the “smartest guys in the room” who made 
+any Californian business that depended on the price of electricity impossible to budget for. I
+opened sourced the compiler and it died a quiet death.</p>
+
+<p>I started this project using Icarus Verilog, using a relatively simple System Verilog subset,
+making sure I could also build on Verilator once I started running larger sims.</p>
+
+<p>I’m a big fan of Xs, verilog’s 4-value ‘undefined’ values - in particular using them as clues to
+synthesis about when we don’t care and using them during simulation to propagate errors when
+assumptions are not met (and to check that we really don’t care)</p>
+
+<p>For example - a 1-hot Mux:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*)
+casez (control) // synthesis full_case parallel_case
+4'b1000: out = in0;
+4'b0100: out = in1;
+4'b0010: out = in2;
+4'b0001: out = in3;
+default: out = 'bx;
+endcase
+</code></pre></div></div>
+
+<p>One could just use:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*) 
+casez (control) // synthesis full_case parallel_case
+4'b1???: out = in0;
+4'b?1??: out = in1;
+4'b??1?: out = in2;
+4'b???1: out = in3;
+endcase
+</code></pre></div></div>
+
+<p>Chances are synthesis will make the same gates - but in the first case simulation is more likely to blow up
+(and here I mean blow up ‘constructively’ - signalling an error) if more than 1 bit of
+control is set. “full_case parallel_case” is a potentially dangerous thing, it gives the synthesis tool
+permission to do something that might not be the same as what the verilog compiler does during simulation
+(if the assumption here that control is one-hot isn’t met) the “out = ‘bx” gets us a warning as the Xs 
+propagate if our design is broken.</p>
+
+<p>Xs are also good for figuring out what really needs to be reset, propagating timing failures etc etc</p>
+
+<p>Sadly Verilator doesn’t support Xs, while Icarus Verilog does. Icarus Verilog also compiles
+a lot faster making for far faster turn around for small tests - I had got to a point where I would
+use Verilator for long tests and Icarus for actual debugging once I could reproduce a problem “in the
+small”.</p>
+
+<p>One of the problems I’ve had with this project is that in simple verilog there really wasn’t a
+way to pass an arbitrary
+number of an interface to an object - for example the dcache needs L dcache read ports, where L is the
+number of load ports - you can pass bit vectors of 1-bit structures, but not an array of n-bit structures
+like addresses, or an array of data results.</p>
+
+<p>System Verilog provides a mechanism to do this via “interfaces” - and this time around I have embraced them
+with a passion - here’s NLOAD async dcache lookups:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>interface DCACHE_LOAD #(int  RV=64, NPHYS=56, NLOAD=2);     
+	typedef struct packed {
+		bit [NPHYS-1:$clog2(RV/8)]addr; // CPU read port
+	} DCACHE_REQ;
+	typedef struct packed {
+		bit hit;
+		bit hit_need_o;                                     
+		bit [RV-1:0]data;
+	} DCACHE_ACK;
+	DCACHE_REQ req[0:NLOAD-1];
+	DCACHE_ACK ack[0:NLOAD-1];
+endinterface
+</code></pre></div></div>
+
+<p>Sadly Icarus Verilog (currently) doesn’t support interfaces and I’ve had to remove them from our
+supported tools - there’s still stuff in the Makefile for its support (I live in hope :-). Even Verilator’s
+support is relatively minimal, it doesn’t support arrays within arrays, nor does it support
+unpacked structures (so debug in gtkwave is primitive).</p>
+
+<p>I’m really going to miss 4-value simulation, I hope IV supports interfaces sometime - I wish
+I had the time to just do it and offer it up, but realisticly one can really only do one Big Thing at a time.</p>
+
+<p>What this does mean though is that longer term a lot of those places where I’m currently making
+on-the-fly verilog from small C programs to get around the inability to pass arbitrary numbers
+of a thing to a module (the register file comes to mind), or using ifdef’s to enable
+particular interfaces will likely go away in the future to be replaced by interfaces. They won’t completely
+go away, I still need them to make things like arbitrary width 1-hot muxes - and more generally
+for large repetitive things that could be ruined by fat finger typos.</p>
+
+<p>You can find the new load/store interfaces in “lstypes.si”.</p>
+
+<p>Next time: Combining ALUs and Branch units</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[Introduction Not really an architectural posting, more about tooling, skip if it’s not really your thing, also new some performance numbers. New Performance Numbers I found the bug in the BTC - mispredicted 4-byte branches that crossed a 16 byte boundary (our instruction bundle size) this is now fixed and we have better dhrystone numbers: 6.33 DMIPS/MHz at an IPC of 2.51 - better than I expected! We can still do better. More System Verilog, Interfaces for the (mostly) win Last week I posted a description about my recent major changes to the way that the load/store unit works, what I didn’t touch on is some pretty major changes to the ways the actual Verilog code is written. I’m an old-time verilog hack, I’ve even written a compiler (actually 2 of them, you can thank me for the * in the “always @(*)” construct). Back in the 90s, I tried to build a cloud biz (before ‘cloud’ was a word) selling time with it for that last couple of months when you need zillions of licenses and machines to run them on. Sadly we were probably ahead of our time, and we got killed by Enron the “smartest guys in the room” who made any Californian business that depended on the price of electricity impossible to budget for. I opened sourced the compiler and it died a quiet death. I started this project using Icarus Verilog, using a relatively simple System Verilog subset, making sure I could also build on Verilator once I started running larger sims. I’m a big fan of Xs, verilog’s 4-value ‘undefined’ values - in particular using them as clues to synthesis about when we don’t care and using them during simulation to propagate errors when assumptions are not met (and to check that we really don’t care) For example - a 1-hot Mux: always @(*) casez (control) // synthesis full_case parallel_case 4'b1000: out = in0; 4'b0100: out = in1; 4'b0010: out = in2; 4'b0001: out = in3; default: out = 'bx; endcase One could just use: always @(*) casez (control) // synthesis full_case parallel_case 4'b1???: out = in0; 4'b?1??: out = in1; 4'b??1?: out = in2; 4'b???1: out = in3; endcase Chances are synthesis will make the same gates - but in the first case simulation is more likely to blow up (and here I mean blow up ‘constructively’ - signalling an error) if more than 1 bit of control is set. “full_case parallel_case” is a potentially dangerous thing, it gives the synthesis tool permission to do something that might not be the same as what the verilog compiler does during simulation (if the assumption here that control is one-hot isn’t met) the “out = ‘bx” gets us a warning as the Xs propagate if our design is broken. Xs are also good for figuring out what really needs to be reset, propagating timing failures etc etc Sadly Verilator doesn’t support Xs, while Icarus Verilog does. Icarus Verilog also compiles a lot faster making for far faster turn around for small tests - I had got to a point where I would use Verilator for long tests and Icarus for actual debugging once I could reproduce a problem “in the small”. One of the problems I’ve had with this project is that in simple verilog there really wasn’t a way to pass an arbitrary number of an interface to an object - for example the dcache needs L dcache read ports, where L is the number of load ports - you can pass bit vectors of 1-bit structures, but not an array of n-bit structures like addresses, or an array of data results. System Verilog provides a mechanism to do this via “interfaces” - and this time around I have embraced them with a passion - here’s NLOAD async dcache lookups: interface DCACHE_LOAD #(int RV=64, NPHYS=56, NLOAD=2); typedef struct packed { bit [NPHYS-1:$clog2(RV/8)]addr; // CPU read port } DCACHE_REQ; typedef struct packed { bit hit; bit hit_need_o; bit [RV-1:0]data; } DCACHE_ACK; DCACHE_REQ req[0:NLOAD-1]; DCACHE_ACK ack[0:NLOAD-1]; endinterface Sadly Icarus Verilog (currently) doesn’t support interfaces and I’ve had to remove them from our supported tools - there’s still stuff in the Makefile for its support (I live in hope :-). Even Verilator’s support is relatively minimal, it doesn’t support arrays within arrays, nor does it support unpacked structures (so debug in gtkwave is primitive). I’m really going to miss 4-value simulation, I hope IV supports interfaces sometime - I wish I had the time to just do it and offer it up, but realisticly one can really only do one Big Thing at a time. What this does mean though is that longer term a lot of those places where I’m currently making on-the-fly verilog from small C programs to get around the inability to pass arbitrary numbers of a thing to a module (the register file comes to mind), or using ifdef’s to enable particular interfaces will likely go away in the future to be replaced by interfaces. They won’t completely go away, I still need them to make things like arbitrary width 1-hot muxes - and more generally for large repetitive things that could be ruined by fat finger typos. You can find the new load/store interfaces in “lstypes.si”. Next time: Combining ALUs and Branch units]]></summary></entry><entry><title type="html">VRoom! blog: Memory Parallelism</title><link href="http://localhost:4000/2022/03/10/memory-parallelism/" rel="alternate" type="text/html" title="VRoom! blog: Memory Parallelism" /><published>2022-03-10T00:00:00+13:00</published><updated>2022-03-10T00:00:00+13:00</updated><id>http://localhost:4000/2022/03/10/memory-parallelism</id><content type="html" xml:base="http://localhost:4000/2022/03/10/memory-parallelism/"><![CDATA[<h3 id="introduction">Introduction</h3>
+
+<p>I’ve not posted in 2 months, mostly because I’ve been spending time redesigning the load/store unit
+this posting is about these changes. This is a long post, but then I’ve been doing a lot of work.</p>
+
+<h3 id="the-problem">The problem</h3>
+
+<p>Back when I was bringing up Linux on the system I spent a lot of time looking at low level
+assembler trace, watching instructions flow through the CPU it became obvious that one of
+the bottlenecks is when large numbers of store instructions occur together they form an
+effective block to earlier scheduling of loads, in particular this happens at the beginning
+of subroutine calls when registers are being saved.</p>
+
+<p>Ideally a subroutine should start loading
+data from memory as soon as possibly after entry - in practice code can’t load a value into say 
+s0 until after it has been saved on the stack - however we have an out-of-order CPU with register
+renaming, it can happily load s0 BEFORE it is saved - provided there’s no memory aliasing between the
+place where the save is being done to and where the load is being done from. Ideally we’d like to be
+able to push as many load instructions before all those register save instructions as possible, we want to 
+get any cache miss from main memory started as soon as possible, then we can save the
+registers into the storeQ and then into cache while we wait.</p>
+
+<h3 id="the-old-design">The old design</h3>
+
+<p>The old memory design issued N loads and M stores in every clock (variously 2:1, 2:2, and 3:2) - loads and
+stores executed in one clock (either into the store queue or retired if there was a cache/storeQ snoop hit.</p>
+
+<p>We used an old trick, the L1 TLB is fully associative, the L1 data cache is set associative - we can look up
+the TLB at the same time that we do the SRAM index portion (with address bits that are not translated by the
+VM system) and then compare the output of the TLB (the
+physical address) with the fetched data cache tags to choose a set - this gives us a lot of useful
+very low level parallelism in the load/store unit - currently we run it in 1 clock (maybe not at 5GHz :-).</p>
+
+<p>These days there are some downsides to
+this design - essentially it’s a general computer architecture problem: page sizes have not been
+increasing while cache line sizes and cache sizes have -
+the data cache index is generated from bits of the page index (the 12 LSBs of a virtual address) that
+are the same for a virtual and physical address - page sizes really haven’t changed since the early 80s,
+and RISC-V uses the same 4k/12-bits that have been used since then - but cache lines have gotten
+longer and caches have got larger- we
+use a 512-bit cache line (64 bytes) - that’s 6-bits of addressing - leaving 6-bits for indexing the
+data cache.
+This means that a direct mapped cache (ie 1 set) can at most have 64x64 bytes - ie 4K - to get a 64k
+L1 cache we need 16 sets, 128k needs 32 sets. One can’t have a large cache without large numbers
+of sets.</p>
+
+<p>There are some advantages to having large numbers
+of sets mostly around Meltdown/Spectre/etc using random replacement and large numbers of sets muddies
+the water for those sorts of exploits - the downsides are essentially a 16:1 or 32:1 mux (and a larger fanout between the TLBs and the comparators) in a critical path.</p>
+
+<p><img src="/public/images/ls.svg" alt="placeholder" title="Load Store Unit" /></p>
+
+<p>Getting back to the reason for this redesign - the big problem though is that in order to safely reorder the execution of load and store instructions 
+safely we need to be able to compare their physical addresses when we’re doing the scheduling (not their
+virtual addresses as their might be aliasing) - and here we have a design where the TLB lookup
+and physically tagged data cache lookup are deeply intertwined. So it has to go ….</p>
+
+<p>There’s another issue - the storeQ - this implicitly orders stores (and loads waiting for stores, or
+for cache fills) -
+it’s a queue, embedded in it’s design is an ordering, transactions must be retired in order, when a store
+reaches the head of the queue AND it’s associated instruction has reach the commit state (ie there’s no
+chance of a branch misprediction or a trap will cause it not be executed)`it attempts to update the
+L1 cache, if it gets a miss it triggers a cache line fetch and a subsequent update. This means that we can’t reorder stores to disjoint addresses post commit - and limits the number of cache line fetches we can
+have in parallel. The queue is nice in that it inherently embeds ordering of operations, but in
+reality most operations don’t require this. Again this also needs to go ….</p>
+
+<h3 id="the-new-design">The new design</h3>
+
+<p>So here’s the new design, it got a lot bigger ….:</p>
+
+<p><img src="/public/images/ls-new.svg" alt="placeholder" title="Load Store Unit" /></p>
+
+<p>First thing to note it’s a 2 clock latency design - first clock is triggered when the address register in
+a load or store is available and just performs the TLB lookup portion of an operation.
+The second clock is triggered when all the addresses conflicts have been ‘resolved’ (that means that there
+are no instructions touching the same bytes that must be done in instruction order that haven’t been pushed into the storeQ) and, if the instruction
+is a store, the data to be stored is available from the pipe.</p>
+
+<p>In the second clock load transactions either
+get resolved because they hit in the dcache or are snooped (from as yet uncommitted stores) from the storeQ. 
+All store and fence transactions, IO transactions, loads that miss in dcache/snoop, loads that suffer
+hazards (for example a 4 byte load that discovers a single byte in that range waiting to be stored in the
+storeQ), all of these cases get put into the storeQ.</p>
+
+<h3 id="pending-transactions">Pending transactions</h3>
+
+<p>The minimum transaction time is now 2 clocks, but it can be many more - we’re processing A address
+transactions (TLB lookups) per clock - we’re simulating with 6, but will likely have to drop back to 4
+on the FPGA system. Some
+transactions can’t be completed right away, some store transactions might still be waiting for the data to
+store to become available, some might be hung up because there’s an instruction ahead of them that needs
+to be executed (in this context ‘executed’ means a load that hits in the icache or snoops in the storeQ,
+or any other instruction that has be pushed into the storeQ), or because there’s a preceding instruction that
+hasn’t been through the address unit (and therefore we can’t tell if there might be a load/store dependency.</p>
+
+<p>The Pending Transactions buffer is a list of transactions (one entry for every instruction entry in
+the commitQ) that have been through the address unit - each entry contains a physical address, a mask of
+the bytes it will read or write (8 bits on a 64-bit machine), fence/amo dependency information and a hazard
+bitmask. The hazard bitmask is similar to the ‘hazard’ structure that we used in the old storeQ (and in the
+new storeQ described below) essentially each entry contains a bitmask (1 bit for every other pending
+transaction), each bit is set if that other pending transaction entry blocks this one.</p>
+
+<p>For example: a load transaction might be blocked by one or more stores to one or more of the bytes the
+load loads, it might also be blocked by a fence or amoXXX instruction - it wont leave the pending
+transactions store until all of these blocking instructions have also left - it will likely find these
+hazards again (and maybe more, new ones) as it’s entered into the storeQ via the snoop operation.</p>
+
+<h3 id="loadstore-units">Load/Store Units</h3>
+
+<p>The load store units have a scheduler that looks at how many free storeQ entries are ready (have 0 hazards)
+and chooses
+N load/store operations to perform, it prioritizes loads because in general we want to move loads
+before stores wherever possible and because we also use the load unit to retire completed loads (and
+things like AMOXXX, LC and SC) - each load unit has a dedicated write port into the general register file.</p>
+
+<p>The load/store scheduler bypasses the pending transaction buffer in a way that it picks up entries from
+the address unit that are about to be written, this is how we can do 2 clock operations.</p>
+
+<p>The load unit starts a dcache access and a snoop operation into the storeQ and then ….</p>
+<ul>
+  <li>I/O accesses go straight into the storeQ</li>
+  <li>if the snoop into the storeQ hits then it returns the newest data (effectively if there are multiple hits it’s the entry that has hazard bits that none of the others have) and the instruction completes</li>
+  <li>if the snoop hits but it returns a hazard (something we need to wait on to complete before we can proceed,
+like a fence, or a partially written location) we put the load into the storeQ</li>
+  <li>if there are no hazards and the dcache hits we return the dcache data</li>
+  <li>otherwise we put the entry into the storeQ</li>
+</ul>
+
+<p>Stores and fences are similar, they always go into the storeQ, we perform a simpler snoop
+just to discover hazard information.</p>
+
+<h3 id="the-new-store-queue">The new store queue</h3>
+
+<p>As mentioned above the storeQ is no longer a simple queue of entries where stuff gets put in at one end and
+interesting stuff happens to entries that reach the other end (and are ready to be committed).</p>
+
+<p>Now it’s more of a heap, with multiple internal ad-hoc queues being created dynamically on the fly. This is
+done as part of the snoop we used to look for speculatively satisfying load transactions from as yet
+uncommitted stores, and a search for hazards (as described above) - we still do that but now we search for
+a wider class of ‘hazards’ that in also represent store-store ordering (making sure that stores to the
+same location
+occur in the same order), load-store dependencies (loads from the same location as stores occur after the 
+ones that are before them in instruction order) and store-load dependences (stores don’t occur until after
+the loads that read the current data in a location have completed), we also use hazards to represent
+fence and amo-style blockages.</p>
+
+<p>A ‘hazard’ is actually represented by a bit mask with one bit for each storeQ entry, a storeQ entry is
+created with the hazards detected when the storeQ is snooped at the load/store unit stage. Logic keeps
+track of which hazard bits are valid, clearing bits as transactions ahead in the ad-hoc queues are retired
+a storeQ entry is not allowed to proceed until all its hazards have been cleared.</p>
+
+<p>Store entries also keep track of activity in the cache lines they would access - the load/store unit has
+an implicit understanding with the underlying cache coherency fabric that it will never make multiple
+concurrent transaction requests for the same cache line. Now if one storeQ entry makes a request for a
+cache line the others must wait (but when it arrives they all get woken up). With this new storeQ we 
+don’t have to wait for an entry to reach the head of the queue and we can now have many
+outstanding cache transactions (before it was just one store and a few loads).</p>
+
+<h3 id="summary">Summary</h3>
+
+<p>We’re currently at the point where this new design passes the sanity tests, I’m sure it’s still buggy
+and I need to spend some times writing some architectural white-box tests trying to poke in the
+obviously hard to trigger corners.</p>
+
+<p>It’s big! lots of NxM stuff - but then this whole design was always based on asking the question “what if
+we throw gates at it?” we have to do lots of comparisons to discover where the hazards are if we want
+to get real memory parallelism.</p>
+
+<p>I’m currently simulating a 6:4:4:6 system - 6 address units, 4 load and 4 store units and 6 write ports to
+the storeQ (so no more than 6 of the load/store units can be scheduled per clock, this area needs some work).
+4 load units means 4 read ports on the dcache, there’s also still only 1 dcache write port there which
+limits write bandwidth, and how fast the storeQ can drain, this also needs some work, and will change
+in the future.</p>
+
+<h2 id="performance">Performance</h2>
+
+<p>I’ve done a small amount of micro-benchmarking - close examination of code sequences show that the area
+I was particularly targeting (write bursts at the beginning of subroutines due to register saves) perform
+well, the address unit fills to capacity (they’re all offsets from the same register SP, and they’re ready
+to schedule almost right away), the store unit also fills, and the load units fill as soon as the commitQ
+starts presenting loads, at that point stores start sitting as pending transactions and loads pass them 
+to be handled - which is also one of our goals.</p>
+
+<p>The main downside is that our one clock load has become a 2 clock load, places where we load an address
+from memory and then immediately load something from that address suffer.</p>
+
+<p>I had thought I was done with dhrystone, but it still proves to be useful as a small easy to run 
+test that exposes microarchitectural issues so here are the results:</p>
+
+<p>Dhrystone on the old design sat at 4.27 dhrystone/MHz - we recently switched to a clang compile because we
+expected it to expose more parallelism to the instruction stream - all numbers (before and after)  here
+are running that same code image and now is at 5.88 which meets our original architectural
+target (a hand wavy number  “5+” pulled out of thin air …) - not a bad increase.</p>
+
+<p>Dhrystone is a very branchy test, we can issue up to 8 instructions per clock but
+running dhrystone we only get 3.61 - that limits how full our pipe can get and how much parallelism can
+likely happen - on this new run we see an average of 2.33 instructions executed per clock (it can’t
+be larger than that 3.61 issue rate). This is still a useful benchmark as it’s worth spending time
+figuring out where those IPC are being lost, I’m pretty sure the 2-clock load is now getting some 
+of it, but on the whole it’s been a great trade for an almost 40% performance increase.
+Note that that 3.61 issue rate/2.33 IPC implies that the largest dhrystone/MHz we can
+reach with this code base is effectively with tweakage is ~9.1.</p>
+
+<p>Switching to clang seems to have exposed a BTC issue, which needs to be fixed which might push us to
+~6.2ish (more hand waving here), but after that probably the next big dhrystone boost will come
+from installing an L0 instruction trace cache
+that should bust the 3.61 issue rate up to close to 8 and expose more parallelism to this new load/store
+architecture - that’s for another day.</p>
+
+<h3 id="future-work">Future Work</h3>
+
+<p>This has been a big change, it needs more testing, I need to move it back onto the AWS/FPGA platform
+for more shaking out, that in itself will be a big job, I’ll probably build a 4:2:2:4 system and even
+then it may not fit in a VU9P (anyone want to contribute a VU13/VU19 board to the cause?). That’s going
+to take a long time.</p>
+
+<p>The new storeQ and the pending transactions block have evolved to be quite similar - I can’t help but feel
+there’s fat there that can be removed. The one main sticking point is data life times, the pending
+transactions are tied 1-1 with commitQ entries (just located elsewhere because otherwise routing might be a
+nightmare) while storeQ entries can long outlive the commitQ entries that birth them (a storeQ
+entry can’t issue a dcache change, or the memory request to fill the dcache entry it wants to change
+until after its associated commitQ entry has been committed, and is about to be recycled).</p>
+
+<p>I also want to start some more serious work on timing, not to make a real chip but to give me more
+feedback on my microarchitecture decisions (I’m sure some stuff will blow up in my face :-) to that end I’ve
+started investigating getting a build into OpenLane/Skyworks - again not with the intent of
+taping something out (it’ probably too big for any of the open source runs) but more as a reality check.</p>
+
+<p>Next time: Verilog changes</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[Introduction I’ve not posted in 2 months, mostly because I’ve been spending time redesigning the load/store unit this posting is about these changes. This is a long post, but then I’ve been doing a lot of work. The problem Back when I was bringing up Linux on the system I spent a lot of time looking at low level assembler trace, watching instructions flow through the CPU it became obvious that one of the bottlenecks is when large numbers of store instructions occur together they form an effective block to earlier scheduling of loads, in particular this happens at the beginning of subroutine calls when registers are being saved. Ideally a subroutine should start loading data from memory as soon as possibly after entry - in practice code can’t load a value into say s0 until after it has been saved on the stack - however we have an out-of-order CPU with register renaming, it can happily load s0 BEFORE it is saved - provided there’s no memory aliasing between the place where the save is being done to and where the load is being done from. Ideally we’d like to be able to push as many load instructions before all those register save instructions as possible, we want to get any cache miss from main memory started as soon as possible, then we can save the registers into the storeQ and then into cache while we wait. The old design The old memory design issued N loads and M stores in every clock (variously 2:1, 2:2, and 3:2) - loads and stores executed in one clock (either into the store queue or retired if there was a cache/storeQ snoop hit. We used an old trick, the L1 TLB is fully associative, the L1 data cache is set associative - we can look up the TLB at the same time that we do the SRAM index portion (with address bits that are not translated by the VM system) and then compare the output of the TLB (the physical address) with the fetched data cache tags to choose a set - this gives us a lot of useful very low level parallelism in the load/store unit - currently we run it in 1 clock (maybe not at 5GHz :-). These days there are some downsides to this design - essentially it’s a general computer architecture problem: page sizes have not been increasing while cache line sizes and cache sizes have - the data cache index is generated from bits of the page index (the 12 LSBs of a virtual address) that are the same for a virtual and physical address - page sizes really haven’t changed since the early 80s, and RISC-V uses the same 4k/12-bits that have been used since then - but cache lines have gotten longer and caches have got larger- we use a 512-bit cache line (64 bytes) - that’s 6-bits of addressing - leaving 6-bits for indexing the data cache. This means that a direct mapped cache (ie 1 set) can at most have 64x64 bytes - ie 4K - to get a 64k L1 cache we need 16 sets, 128k needs 32 sets. One can’t have a large cache without large numbers of sets. There are some advantages to having large numbers of sets mostly around Meltdown/Spectre/etc using random replacement and large numbers of sets muddies the water for those sorts of exploits - the downsides are essentially a 16:1 or 32:1 mux (and a larger fanout between the TLBs and the comparators) in a critical path. Getting back to the reason for this redesign - the big problem though is that in order to safely reorder the execution of load and store instructions safely we need to be able to compare their physical addresses when we’re doing the scheduling (not their virtual addresses as their might be aliasing) - and here we have a design where the TLB lookup and physically tagged data cache lookup are deeply intertwined. So it has to go …. There’s another issue - the storeQ - this implicitly orders stores (and loads waiting for stores, or for cache fills) - it’s a queue, embedded in it’s design is an ordering, transactions must be retired in order, when a store reaches the head of the queue AND it’s associated instruction has reach the commit state (ie there’s no chance of a branch misprediction or a trap will cause it not be executed)`it attempts to update the L1 cache, if it gets a miss it triggers a cache line fetch and a subsequent update. This means that we can’t reorder stores to disjoint addresses post commit - and limits the number of cache line fetches we can have in parallel. The queue is nice in that it inherently embeds ordering of operations, but in reality most operations don’t require this. Again this also needs to go …. The new design So here’s the new design, it got a lot bigger ….: First thing to note it’s a 2 clock latency design - first clock is triggered when the address register in a load or store is available and just performs the TLB lookup portion of an operation. The second clock is triggered when all the addresses conflicts have been ‘resolved’ (that means that there are no instructions touching the same bytes that must be done in instruction order that haven’t been pushed into the storeQ) and, if the instruction is a store, the data to be stored is available from the pipe. In the second clock load transactions either get resolved because they hit in the dcache or are snooped (from as yet uncommitted stores) from the storeQ. All store and fence transactions, IO transactions, loads that miss in dcache/snoop, loads that suffer hazards (for example a 4 byte load that discovers a single byte in that range waiting to be stored in the storeQ), all of these cases get put into the storeQ. Pending transactions The minimum transaction time is now 2 clocks, but it can be many more - we’re processing A address transactions (TLB lookups) per clock - we’re simulating with 6, but will likely have to drop back to 4 on the FPGA system. Some transactions can’t be completed right away, some store transactions might still be waiting for the data to store to become available, some might be hung up because there’s an instruction ahead of them that needs to be executed (in this context ‘executed’ means a load that hits in the icache or snoops in the storeQ, or any other instruction that has be pushed into the storeQ), or because there’s a preceding instruction that hasn’t been through the address unit (and therefore we can’t tell if there might be a load/store dependency. The Pending Transactions buffer is a list of transactions (one entry for every instruction entry in the commitQ) that have been through the address unit - each entry contains a physical address, a mask of the bytes it will read or write (8 bits on a 64-bit machine), fence/amo dependency information and a hazard bitmask. The hazard bitmask is similar to the ‘hazard’ structure that we used in the old storeQ (and in the new storeQ described below) essentially each entry contains a bitmask (1 bit for every other pending transaction), each bit is set if that other pending transaction entry blocks this one. For example: a load transaction might be blocked by one or more stores to one or more of the bytes the load loads, it might also be blocked by a fence or amoXXX instruction - it wont leave the pending transactions store until all of these blocking instructions have also left - it will likely find these hazards again (and maybe more, new ones) as it’s entered into the storeQ via the snoop operation. Load/Store Units The load store units have a scheduler that looks at how many free storeQ entries are ready (have 0 hazards) and chooses N load/store operations to perform, it prioritizes loads because in general we want to move loads before stores wherever possible and because we also use the load unit to retire completed loads (and things like AMOXXX, LC and SC) - each load unit has a dedicated write port into the general register file. The load/store scheduler bypasses the pending transaction buffer in a way that it picks up entries from the address unit that are about to be written, this is how we can do 2 clock operations. The load unit starts a dcache access and a snoop operation into the storeQ and then …. I/O accesses go straight into the storeQ if the snoop into the storeQ hits then it returns the newest data (effectively if there are multiple hits it’s the entry that has hazard bits that none of the others have) and the instruction completes if the snoop hits but it returns a hazard (something we need to wait on to complete before we can proceed, like a fence, or a partially written location) we put the load into the storeQ if there are no hazards and the dcache hits we return the dcache data otherwise we put the entry into the storeQ Stores and fences are similar, they always go into the storeQ, we perform a simpler snoop just to discover hazard information. The new store queue As mentioned above the storeQ is no longer a simple queue of entries where stuff gets put in at one end and interesting stuff happens to entries that reach the other end (and are ready to be committed). Now it’s more of a heap, with multiple internal ad-hoc queues being created dynamically on the fly. This is done as part of the snoop we used to look for speculatively satisfying load transactions from as yet uncommitted stores, and a search for hazards (as described above) - we still do that but now we search for a wider class of ‘hazards’ that in also represent store-store ordering (making sure that stores to the same location occur in the same order), load-store dependencies (loads from the same location as stores occur after the ones that are before them in instruction order) and store-load dependences (stores don’t occur until after the loads that read the current data in a location have completed), we also use hazards to represent fence and amo-style blockages. A ‘hazard’ is actually represented by a bit mask with one bit for each storeQ entry, a storeQ entry is created with the hazards detected when the storeQ is snooped at the load/store unit stage. Logic keeps track of which hazard bits are valid, clearing bits as transactions ahead in the ad-hoc queues are retired a storeQ entry is not allowed to proceed until all its hazards have been cleared. Store entries also keep track of activity in the cache lines they would access - the load/store unit has an implicit understanding with the underlying cache coherency fabric that it will never make multiple concurrent transaction requests for the same cache line. Now if one storeQ entry makes a request for a cache line the others must wait (but when it arrives they all get woken up). With this new storeQ we don’t have to wait for an entry to reach the head of the queue and we can now have many outstanding cache transactions (before it was just one store and a few loads). Summary We’re currently at the point where this new design passes the sanity tests, I’m sure it’s still buggy and I need to spend some times writing some architectural white-box tests trying to poke in the obviously hard to trigger corners. It’s big! lots of NxM stuff - but then this whole design was always based on asking the question “what if we throw gates at it?” we have to do lots of comparisons to discover where the hazards are if we want to get real memory parallelism. I’m currently simulating a 6:4:4:6 system - 6 address units, 4 load and 4 store units and 6 write ports to the storeQ (so no more than 6 of the load/store units can be scheduled per clock, this area needs some work). 4 load units means 4 read ports on the dcache, there’s also still only 1 dcache write port there which limits write bandwidth, and how fast the storeQ can drain, this also needs some work, and will change in the future. Performance I’ve done a small amount of micro-benchmarking - close examination of code sequences show that the area I was particularly targeting (write bursts at the beginning of subroutines due to register saves) perform well, the address unit fills to capacity (they’re all offsets from the same register SP, and they’re ready to schedule almost right away), the store unit also fills, and the load units fill as soon as the commitQ starts presenting loads, at that point stores start sitting as pending transactions and loads pass them to be handled - which is also one of our goals. The main downside is that our one clock load has become a 2 clock load, places where we load an address from memory and then immediately load something from that address suffer. I had thought I was done with dhrystone, but it still proves to be useful as a small easy to run test that exposes microarchitectural issues so here are the results: Dhrystone on the old design sat at 4.27 dhrystone/MHz - we recently switched to a clang compile because we expected it to expose more parallelism to the instruction stream - all numbers (before and after) here are running that same code image and now is at 5.88 which meets our original architectural target (a hand wavy number “5+” pulled out of thin air …) - not a bad increase. Dhrystone is a very branchy test, we can issue up to 8 instructions per clock but running dhrystone we only get 3.61 - that limits how full our pipe can get and how much parallelism can likely happen - on this new run we see an average of 2.33 instructions executed per clock (it can’t be larger than that 3.61 issue rate). This is still a useful benchmark as it’s worth spending time figuring out where those IPC are being lost, I’m pretty sure the 2-clock load is now getting some of it, but on the whole it’s been a great trade for an almost 40% performance increase. Note that that 3.61 issue rate/2.33 IPC implies that the largest dhrystone/MHz we can reach with this code base is effectively with tweakage is ~9.1. Switching to clang seems to have exposed a BTC issue, which needs to be fixed which might push us to ~6.2ish (more hand waving here), but after that probably the next big dhrystone boost will come from installing an L0 instruction trace cache that should bust the 3.61 issue rate up to close to 8 and expose more parallelism to this new load/store architecture - that’s for another day. Future Work This has been a big change, it needs more testing, I need to move it back onto the AWS/FPGA platform for more shaking out, that in itself will be a big job, I’ll probably build a 4:2:2:4 system and even then it may not fit in a VU9P (anyone want to contribute a VU13/VU19 board to the cause?). That’s going to take a long time. The new storeQ and the pending transactions block have evolved to be quite similar - I can’t help but feel there’s fat there that can be removed. The one main sticking point is data life times, the pending transactions are tied 1-1 with commitQ entries (just located elsewhere because otherwise routing might be a nightmare) while storeQ entries can long outlive the commitQ entries that birth them (a storeQ entry can’t issue a dcache change, or the memory request to fill the dcache entry it wants to change until after its associated commitQ entry has been committed, and is about to be recycled). I also want to start some more serious work on timing, not to make a real chip but to give me more feedback on my microarchitecture decisions (I’m sure some stuff will blow up in my face :-) to that end I’ve started investigating getting a build into OpenLane/Skyworks - again not with the intent of taping something out (it’ probably too big for any of the open source runs) but more as a reality check. Next time: Verilog changes]]></summary></entry><entry><title type="html">VRoom! blog: Virtual Memory</title><link href="http://localhost:4000/2022/01/16/virtual-memory/" rel="alternate" type="text/html" title="VRoom! blog: Virtual Memory" /><published>2022-01-16T00:00:00+13:00</published><updated>2022-01-16T00:00:00+13:00</updated><id>http://localhost:4000/2022/01/16/virtual-memory</id><content type="html" xml:base="http://localhost:4000/2022/01/16/virtual-memory/"><![CDATA[<h3 id="introduction">Introduction</h3>
+
+<p>Booting Linux isn’t going to work without some form of virtual memory, RISC-V has
+a well defined spec for VM, implementation isn’t hard - page tables are well defined,
+there’s nothing particularly unusual or surprising there</p>
+
+<h3 id="l1-tlbs">L1 TLBs</h3>
+
+<p>We have separate Instruction and Data level one TLBs, they’re fully associative which means that
+we’re not practically limited to power of two sizes (though currently they have 32 entries each),
+each entry contains a mapping between an ASID and upper bits of a virtual address and a physical
+address - we support the various sizes of pages (both in tags and data).</p>
+
+<p>A fully associative TLB with random replacement makes it harder for Meltdown/Spectre sorts of
+attacks to use TLB replacement to attack systems. On VROOM memory accesses that miss in the TLB never result in
+data cache changes.</p>
+
+<p>Since the ALUs, and in particular the memory and fetch units, are shared between HARTs (CPUs) in the same
+simultaneous multi-threaded core then so are the TLBs shared.  We need a way to distinguish mappings between HARTs - this implementation
+is simple, we reserve a portion of the ASID which is forced to a unique value for each core - each HART thinks it has N bits of ASID, in reality there are N+1. There’s also
+a system flag that we can optionally set that lets SMT HARTs share the full sized ASID (provided the software understands
+that ASIDs are system rather than CPU global).</p>
+
+<p>Currently we use the old trick of doing L1 TLB lookup with the upper bits of a virtual address while using
+the lower bits in parallel to do the indexing of the L1 data/instruction caches - large modern cache line sizes 
+mean that you have to go many ways/sets to get large data and instruction caches - this also helps
+with Meltdown/Spectre/etc mitigation.</p>
+
+<p>I’m currently redesigning the whole memory datapath unit to split TLB lookup and data cache access
+into separate cycles - mostly to expose more parallelism during scheduling - more about that in
+a later posting once it’s all working.</p>
+
+<h3 id="l2-tlbs">L2 TLBs</h3>
+
+<p>TLB misses result in stalled instructions in the commitQ - there’s a small queue of pending TLB 
+lookups in the memory unit and 2 pending lookups in the fetch unit - they feed the table walker
+state machine which starts by dipping into the L2 TLB cache - currently it’s a 4-way 256 entry (so
+1k entries total) set associative cache shared between the instruction and data TLBs - TLB data found here is fed directly to the L1 TLBs (a satisfied L1 miss takes 4
+clocks).</p>
+
+<h3 id="table-walking">Table walking</h3>
+
+<p>If a request also misses in the L2 TLB cache the table walker state machine starts walking page table trees.</p>
+
+<p>Full
+cache lines of TLB data are fetched into a local read-only cache which contains a small number of entries,
+essentially enough for 1 line for each level in the page hierarchy, and 2 for the lowest level, repeated 
+for instruction TLB and the data TLB (then repeated again for multiple HARTs).</p>
+
+<p>After initial filling most table walks hit in this cache. This cache is slightly integrated into the data L1 I-cache, they share a 
+read-only access port into the cache coherency fabric, and both can be invalidated by data cache snoops shootdowns.</p>
+
+<h3 id="tlb-invalidation">TLB Invalidation</h3>
+
+<p>TLB invalidation is triggered by executing a TLB flush instruction - these instructions let the instructions
+before them in the commitQ execute before they themselves are executed.</p>
+
+<p>At this point they trigger a
+commitQ flush (tossing any speculative instructions executed with the old VM mappings). At the same time
+they trigger L1 and L2 TLB flushes. Note: there is no need to invalidate the TLB walker’s small data cache
+as it will have been invalidated (shot down) by the cache coherency protocols if any page tables were
+changed in the process.</p>
+
+<p>Next time: (Once I get it working) Data memory accesses</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[Introduction Booting Linux isn’t going to work without some form of virtual memory, RISC-V has a well defined spec for VM, implementation isn’t hard - page tables are well defined, there’s nothing particularly unusual or surprising there L1 TLBs We have separate Instruction and Data level one TLBs, they’re fully associative which means that we’re not practically limited to power of two sizes (though currently they have 32 entries each), each entry contains a mapping between an ASID and upper bits of a virtual address and a physical address - we support the various sizes of pages (both in tags and data). A fully associative TLB with random replacement makes it harder for Meltdown/Spectre sorts of attacks to use TLB replacement to attack systems. On VROOM memory accesses that miss in the TLB never result in data cache changes. Since the ALUs, and in particular the memory and fetch units, are shared between HARTs (CPUs) in the same simultaneous multi-threaded core then so are the TLBs shared. We need a way to distinguish mappings between HARTs - this implementation is simple, we reserve a portion of the ASID which is forced to a unique value for each core - each HART thinks it has N bits of ASID, in reality there are N+1. There’s also a system flag that we can optionally set that lets SMT HARTs share the full sized ASID (provided the software understands that ASIDs are system rather than CPU global). Currently we use the old trick of doing L1 TLB lookup with the upper bits of a virtual address while using the lower bits in parallel to do the indexing of the L1 data/instruction caches - large modern cache line sizes mean that you have to go many ways/sets to get large data and instruction caches - this also helps with Meltdown/Spectre/etc mitigation. I’m currently redesigning the whole memory datapath unit to split TLB lookup and data cache access into separate cycles - mostly to expose more parallelism during scheduling - more about that in a later posting once it’s all working. L2 TLBs TLB misses result in stalled instructions in the commitQ - there’s a small queue of pending TLB lookups in the memory unit and 2 pending lookups in the fetch unit - they feed the table walker state machine which starts by dipping into the L2 TLB cache - currently it’s a 4-way 256 entry (so 1k entries total) set associative cache shared between the instruction and data TLBs - TLB data found here is fed directly to the L1 TLBs (a satisfied L1 miss takes 4 clocks). Table walking If a request also misses in the L2 TLB cache the table walker state machine starts walking page table trees. Full cache lines of TLB data are fetched into a local read-only cache which contains a small number of entries, essentially enough for 1 line for each level in the page hierarchy, and 2 for the lowest level, repeated for instruction TLB and the data TLB (then repeated again for multiple HARTs). After initial filling most table walks hit in this cache. This cache is slightly integrated into the data L1 I-cache, they share a read-only access port into the cache coherency fabric, and both can be invalidated by data cache snoops shootdowns. TLB Invalidation TLB invalidation is triggered by executing a TLB flush instruction - these instructions let the instructions before them in the commitQ execute before they themselves are executed. At this point they trigger a commitQ flush (tossing any speculative instructions executed with the old VM mappings). At the same time they trigger L1 and L2 TLB flushes. Note: there is no need to invalidate the TLB walker’s small data cache as it will have been invalidated (shot down) by the cache coherency protocols if any page tables were changed in the process. Next time: (Once I get it working) Data memory accesses]]></summary></entry><entry><title type="html">VRoom! blog: Building on AWS</title><link href="http://localhost:4000/2021/12/19/building-on-AWS/" rel="alternate" type="text/html" title="VRoom! blog: Building on AWS" /><published>2021-12-19T00:00:00+13:00</published><updated>2021-12-19T00:00:00+13:00</updated><id>http://localhost:4000/2021/12/19/building-on-AWS</id><content type="html" xml:base="http://localhost:4000/2021/12/19/building-on-AWS/"><![CDATA[<h3 id="introduction">Introduction</h3>
+
+<p>I started doing VLSI design in the early ’90s building graphics
+accelerators at 2um and later in the decade building CPUs at 1.8u-0.5u - gates
+and pins were expensive - we once bet the company on the viability of a 208
+pin plastic package, something that paid off magnificently.</p>
+
+<p>I started this project with the vague idea of “what happens if I 
+throw a lot of gates at it?” - my original planned development platform was a
+board off of Aliexpress a lot like <a href="https://www.aliexpress.com/item/1005001631827738.html?spm=a2g0o.store_pc_allProduct.0.0.6cdd5f43GfqQnH&amp;pdp_ext_f=%7B%22sku_id%22:%2212000024008890133%22,%22ship_from%22:%22CN%22%7D&amp;gps-id=pcStoreJustForYou&amp;scm=1007.23125.137358.0&amp;scm_id=1007.23125.137358.0&amp;scm-url=1007.23125.137358.0&amp;pvid=3326dc0a-70a6-4f9f-b650-e64de4c91258">this one</a> an Xylinx Kinetix 420 based board with embedded 
+DRAM - my plan was to wire an SD card socket to it and used the internal USB to serial
+hardware to boot linux.</p>
+
+<p>When I first compiled up VRoom! for it I had a slight problem …. the design was 50% too big! oops ….</p>
+
+<p>So I went around looking for bigger targets ….</p>
+
+<h3 id="awss-fpga-instances">AWS’s FPGA Instances</h3>
+
+<p>AWS provides an <a href="https://aws.amazon.com/ec2/instance-types/f1/">FPGA based service</a> based on Xilinx’s Ultrascale VU9Ps - these are much larger
+FPGAs, just what the doctor ordered. The F instances seem to be aimed at high
+frequency traders - we’re small fry in comparison. They are based on a PCIE board in an
+Intel based CPU - we assume they actually put 4 boards into each CPU and sell the
+minimum as a virtual instance with 8 virtual cores and a physical FPGA board. This
+is the F1 instance that we use for development.</p>
+
+<p>The AWS F instances each include a VU9P, 4 sets of DDR4 (we use one), and several PCIEs
+to the host CPU (we use one simple one).</p>
+
+<p>The VU9P is an interesting beast it seems to actually be a sandwich of 3 dies, with
+~1500 wires between the middle die and the upper die and ~1500 wires between the middle die and the lower die. These wires make the thing possible but they’re also a problem,
+firstly they are potentially a scarce routing resource (not for us yet), and secondly
+they are slow - for speed Xilinx recommend that one carefully pipe all the die crossings (ie a flop on either side). We’ve
+decided to not do that, as it would mean messing with a design where we’re actually
+trying to carefully debug the actual pipelining for a real CPU. Rather than have this
+reality intrude on our design we’ve had to reduce our target clock from 100MHz to 25MHz
+currently most critical paths have several die crossings.</p>
+
+<p><img src="/talk/assets/chip.png" alt="placeholder" title="die image" /></p>
+
+<p>The above image shows a recent layout plot - you can see the three dies. The upper 25%
+on the center and right hand side dies is AWS’s “shell” a built in interface to the 
+host CPU and one DDR4 controller. There is now a smaller shell available which we
+may switch to soon that removes a whole lot of functionality that
+we don’t need, and gives us ~10% more gates (but sadly in the wrong places).</p>
+
+<p>Development is done on an AWS FPGA development instance, you don’t need to pay
+for a Vivado license if you do your development on AWS. The actual build environment,
+documentation (and the shell) <a href="https://github.com/aws/aws-fpga/">is available on github</a>.</p>
+
+<p>Build time is very variable, our big problem is congestion (timing issues come
+from that) and builds can take any time from 10-20 hours and don’t always succeed.
+We’ve had to drop the sizes of out I/D caches by 50% and our BTC by 8x to make this work.</p>
+
+<p>AWS don’t want us to trash their hardware so after you’ve completed building a new
+design you have to submit it for testing - they do a bunch of things presumably looking for over current and over temp issues (we haven’t had one rejected yet). This
+takes about an hour.</p>
+
+<p>F1 instances cost ~US$1.50/hour to use, the build systems about US$1/hour.</p>
+
+<h3 id="chip-architecture">Chip Architecture</h3>
+
+<p>AWS provide their “shell”, a fixed, pre-laid out interface - you can see it in
+this block diagram as “AWS support”:</p>
+
+<p><img src="/talk/assets/vu9p.svg" alt="placeholder" title="chip architecture" /></p>
+
+<p>The shell provides AXI interfaces looking inwards (our DRAM controller is a
+master, our disk/UART are clients).</p>
+
+<p>We’ve added a simple UART, dumb fake disk controller (really just a 256-byte
+FIFO) to the shell, and a register that allows us to reset the VROOM!. These
+simple devices are made visible on the PCIE as registers and mapped into a
+user space linux app running on the host Intel CPU.</p>
+
+<p>The VROOM! is instanced with a minimal number of connections (the above devices,
+DRAM and clocks). It is essentially the same top level we use in verilog simulation
+(from chip.sv down, one CPU and one set of IO devices).</p>
+
+<h3 id="software">Software</h3>
+
+<p>The Linux user space software is a thread that maps the PCIE register
+space and then pulls the CPU out of reset. It then loops reading from 
+the UART and ‘disk’ registers, if it finds a disk request it provides
+data from one of two sources (an OpenSBI/Uboot image or a linux file 
+system image), if it finds incoming uart data it wakes a text display thread
+to print it on the console. A third thread reads data from the console and
+puts it into the uart to send when space is available.</p>
+
+<h3 id="software-release">Software release</h3>
+
+<p>We haven’t included the AWS interface code in the current VROOM! source
+release, partly because we don’t want to confuse it with the real thing
+we’re trying to build. But also because it’s mostly embedded in code
+that is AWS’s IP (the shell API is one big verilog module that one needs
+to embed one’s own IP) - there are no secrets on our part, we’re happy 
+to share if anyone is interested.</p>
+
+<p>Next time: (probably after Xmas) Virtual Memory</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[Introduction I started doing VLSI design in the early ’90s building graphics accelerators at 2um and later in the decade building CPUs at 1.8u-0.5u - gates and pins were expensive - we once bet the company on the viability of a 208 pin plastic package, something that paid off magnificently. I started this project with the vague idea of “what happens if I throw a lot of gates at it?” - my original planned development platform was a board off of Aliexpress a lot like this one an Xylinx Kinetix 420 based board with embedded DRAM - my plan was to wire an SD card socket to it and used the internal USB to serial hardware to boot linux. When I first compiled up VRoom! for it I had a slight problem …. the design was 50% too big! oops …. So I went around looking for bigger targets …. AWS’s FPGA Instances AWS provides an FPGA based service based on Xilinx’s Ultrascale VU9Ps - these are much larger FPGAs, just what the doctor ordered. The F instances seem to be aimed at high frequency traders - we’re small fry in comparison. They are based on a PCIE board in an Intel based CPU - we assume they actually put 4 boards into each CPU and sell the minimum as a virtual instance with 8 virtual cores and a physical FPGA board. This is the F1 instance that we use for development. The AWS F instances each include a VU9P, 4 sets of DDR4 (we use one), and several PCIEs to the host CPU (we use one simple one). The VU9P is an interesting beast it seems to actually be a sandwich of 3 dies, with ~1500 wires between the middle die and the upper die and ~1500 wires between the middle die and the lower die. These wires make the thing possible but they’re also a problem, firstly they are potentially a scarce routing resource (not for us yet), and secondly they are slow - for speed Xilinx recommend that one carefully pipe all the die crossings (ie a flop on either side). We’ve decided to not do that, as it would mean messing with a design where we’re actually trying to carefully debug the actual pipelining for a real CPU. Rather than have this reality intrude on our design we’ve had to reduce our target clock from 100MHz to 25MHz currently most critical paths have several die crossings. The above image shows a recent layout plot - you can see the three dies. The upper 25% on the center and right hand side dies is AWS’s “shell” a built in interface to the host CPU and one DDR4 controller. There is now a smaller shell available which we may switch to soon that removes a whole lot of functionality that we don’t need, and gives us ~10% more gates (but sadly in the wrong places). Development is done on an AWS FPGA development instance, you don’t need to pay for a Vivado license if you do your development on AWS. The actual build environment, documentation (and the shell) is available on github. Build time is very variable, our big problem is congestion (timing issues come from that) and builds can take any time from 10-20 hours and don’t always succeed. We’ve had to drop the sizes of out I/D caches by 50% and our BTC by 8x to make this work. AWS don’t want us to trash their hardware so after you’ve completed building a new design you have to submit it for testing - they do a bunch of things presumably looking for over current and over temp issues (we haven’t had one rejected yet). This takes about an hour. F1 instances cost ~US$1.50/hour to use, the build systems about US$1/hour. Chip Architecture AWS provide their “shell”, a fixed, pre-laid out interface - you can see it in this block diagram as “AWS support”: The shell provides AXI interfaces looking inwards (our DRAM controller is a master, our disk/UART are clients). We’ve added a simple UART, dumb fake disk controller (really just a 256-byte FIFO) to the shell, and a register that allows us to reset the VROOM!. These simple devices are made visible on the PCIE as registers and mapped into a user space linux app running on the host Intel CPU. The VROOM! is instanced with a minimal number of connections (the above devices, DRAM and clocks). It is essentially the same top level we use in verilog simulation (from chip.sv down, one CPU and one set of IO devices). Software The Linux user space software is a thread that maps the PCIE register space and then pulls the CPU out of reset. It then loops reading from the UART and ‘disk’ registers, if it finds a disk request it provides data from one of two sources (an OpenSBI/Uboot image or a linux file system image), if it finds incoming uart data it wakes a text display thread to print it on the console. A third thread reads data from the console and puts it into the uart to send when space is available. Software release We haven’t included the AWS interface code in the current VROOM! source release, partly because we don’t want to confuse it with the real thing we’re trying to build. But also because it’s mostly embedded in code that is AWS’s IP (the shell API is one big verilog module that one needs to embed one’s own IP) - there are no secrets on our part, we’re happy to share if anyone is interested. Next time: (probably after Xmas) Virtual Memory]]></summary></entry><entry><title type="html">VRoom! blog: Memory Layout</title><link href="http://localhost:4000/2021/12/05/memory-layout/" rel="alternate" type="text/html" title="VRoom! blog: Memory Layout" /><published>2021-12-05T00:00:00+13:00</published><updated>2021-12-05T00:00:00+13:00</updated><id>http://localhost:4000/2021/12/05/memory-layout</id><content type="html" xml:base="http://localhost:4000/2021/12/05/memory-layout/"><![CDATA[<h3 id="introduction">Introduction</h3>
+
+<p>A short post this week about physical memory layout and a little bit about booting. I’ll talk more
+about virtual memory another time</p>
+
+<h3 id="physical-memory-layout">Physical memory layout</h3>
+
+<p>We currently use a 56-bit physical address, this is the address used with the MMU disabled or after a
+virtual address has been translated.</p>
+
+<p>Addresses with bit 55 (the most significant bit) set to 0 are treated as cacheable memory space - instruction
+and data accesses go through separate L1 caches but the cache coherency protocol makes sure that they see the
+same data. Cache lines are 512 bits.</p>
+
+<p>Everything in this space is cache coherent, once the system is booted it’s the only place that code can
+be executed from. Because it’s always coherent, the fence.i instruction is a simple thing for us, all it has to do is to
+wait for the writes to drain from the store queue and then flush the commitQ (fences go in the commitQ so all
+that happens when it reaches the end of the queue), subsequent instruction fetches
+pull live modified data from the data cache into the instruction cache.</p>
+
+<p>At the moment we have either a fake memory emulator on the simulator, or connect to DRAM on the AWS FPGA 
+implementation - both implementations back onto the coherent MOESI bus</p>
+
+<p>Within this space main memory (DRAM) starts at address 0x00000000. What happens if you access memory
+outside of the area where there’s real DRAM is undefined, with the proviso that it wont lock up
+(writes probably get lost or wrap around, reads may return undefined data - it’s up to the real
+memory controller to choose how it behaves - on a big system the memory controller may be on another die).</p>
+
+<p>Addresses with bit 55 set are handled differently for data accesses and instruction accesses:</p>
+<ul>
+  <li>instruction accesses got to a boot ROM at a known fixed address, the MMU never generates these addresses</li>
+  <li>data accesses go to a shared 64-bit IO bus (can be accessed through the MMU)</li>
+</ul>
+
+<p>The current data IO bus contains:</p>
+<ul>
+  <li>a ROM containing a device tree image</li>
+  <li>timers</li>
+  <li>a uart</li>
+  <li>gpio</li>
+  <li>multiple interrupt controllers PLIC/CLNT/CLIC</li>
+  <li>a fake disk controller</li>
+</ul>
+
+<h3 id="booting">Booting</h3>
+
+<p>Currently reset causes the CPU to jump to the start of code compiled into hardware in the special instruction space.
+Currently that code:</p>
+<ul>
+  <li>checks a GPIO pin (reads from IO space)</li>
+  <li>if it’s set it jumps to address 0 (this is for the simulator where main memory can be side loaded)</li>
+  <li>if it’s clear we read a boot image from the fake disk controller (connected to test fixture code on
+the simulator, and to linux user space on the AWS FPGA world) into main memory, then jump to it
+(currently we load uboot/OpenSBI)</li>
+</ul>
+
+<p>Longer term we plan to put the two L1 caches into a mode at reset where the memory controller is disabled
+and the data cache allocates lines on write, the instruction cache will use the existing cache coherency protocol
+to pull shared cache lines from the data cache. The on-chip bootstrap will copy data into L1 from an SD/eMMC, validate it
+(a crypto signature check), and jump into it. This code will initialize the DRAM controller, run it through
+its startup conditioning, initialize the rest of the devices, take the cache controller out of
+its reset mode and then finally load OpenSBi/UEFI/uboot/etc into DRAM.</p>
+
+<p>Next time: Building on AWS</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[Introduction A short post this week about physical memory layout and a little bit about booting. I’ll talk more about virtual memory another time Physical memory layout We currently use a 56-bit physical address, this is the address used with the MMU disabled or after a virtual address has been translated. Addresses with bit 55 (the most significant bit) set to 0 are treated as cacheable memory space - instruction and data accesses go through separate L1 caches but the cache coherency protocol makes sure that they see the same data. Cache lines are 512 bits. Everything in this space is cache coherent, once the system is booted it’s the only place that code can be executed from. Because it’s always coherent, the fence.i instruction is a simple thing for us, all it has to do is to wait for the writes to drain from the store queue and then flush the commitQ (fences go in the commitQ so all that happens when it reaches the end of the queue), subsequent instruction fetches pull live modified data from the data cache into the instruction cache. At the moment we have either a fake memory emulator on the simulator, or connect to DRAM on the AWS FPGA implementation - both implementations back onto the coherent MOESI bus Within this space main memory (DRAM) starts at address 0x00000000. What happens if you access memory outside of the area where there’s real DRAM is undefined, with the proviso that it wont lock up (writes probably get lost or wrap around, reads may return undefined data - it’s up to the real memory controller to choose how it behaves - on a big system the memory controller may be on another die). Addresses with bit 55 set are handled differently for data accesses and instruction accesses: instruction accesses got to a boot ROM at a known fixed address, the MMU never generates these addresses data accesses go to a shared 64-bit IO bus (can be accessed through the MMU) The current data IO bus contains: a ROM containing a device tree image timers a uart gpio multiple interrupt controllers PLIC/CLNT/CLIC a fake disk controller Booting Currently reset causes the CPU to jump to the start of code compiled into hardware in the special instruction space. Currently that code: checks a GPIO pin (reads from IO space) if it’s set it jumps to address 0 (this is for the simulator where main memory can be side loaded) if it’s clear we read a boot image from the fake disk controller (connected to test fixture code on the simulator, and to linux user space on the AWS FPGA world) into main memory, then jump to it (currently we load uboot/OpenSBI) Longer term we plan to put the two L1 caches into a mode at reset where the memory controller is disabled and the data cache allocates lines on write, the instruction cache will use the existing cache coherency protocol to pull shared cache lines from the data cache. The on-chip bootstrap will copy data into L1 from an SD/eMMC, validate it (a crypto signature check), and jump into it. This code will initialize the DRAM controller, run it through its startup conditioning, initialize the rest of the devices, take the cache controller out of its reset mode and then finally load OpenSBi/UEFI/uboot/etc into DRAM. Next time: Building on AWS]]></summary></entry><entry><title type="html">Vroom! blog: Core VRoom! Architecture</title><link href="http://localhost:4000/2021/11/28/core-architecture/" rel="alternate" type="text/html" title="Vroom! blog: Core VRoom! Architecture" /><published>2021-11-28T00:00:00+13:00</published><updated>2021-11-28T00:00:00+13:00</updated><id>http://localhost:4000/2021/11/28/core-architecture</id><content type="html" xml:base="http://localhost:4000/2021/11/28/core-architecture/"><![CDATA[<h3 id="introduction">Introduction</h3>
+
+<p>This week we’re going to try and explain as simply as possible how our core architecture works. Here’s an
+overview of the system:</p>
+
+<p><img src="/talk/assets/overview.svg" alt="placeholder" title="System Architecture" /></p>
+
+<p>The core structure is a first-in-first out queue called the ‘commitQ’. Instruction-bundles
+are inserted in-order at one end, and removed in-order at the other
+end once they have been committed.</p>
+
+<p>While in the commitQ instructions can be executed in any order (with some limits like memory
+aliasing for load/store instructions). At any time, if a branch instruction is discovered to have
+been wrongly predicted, the instructions following it in the queue will be discarded.</p>
+
+<p>A note on terminology - previously I’ve referred to ‘decode-bundle’s which are a bunch of bytes fetched from the i-cache 
+and fed to the decoders. Here we talk about ‘instruction-bundle’s which are a bunch of data being passed around 
+through the CPU representing an instruction and what it can do - data in an instruction-bundle includes its PC,
+its input/output registers, immediate constants, which ALU type it needs to be fed to, what operation will be
+performed on it there, etc.</p>
+
+<p>You can think of the decoders as taking a decode-bundle and producing 1-8 instruction-bundles 
+per clock to feed to the renamer.</p>
+
+<h3 id="registers-and-register-renaming">Registers and Register Renaming</h3>
+
+<p>We have a split register file:</p>
+
+<p><img src="/talk/assets/registers.svg" alt="placeholder" title="Register Files" /></p>
+
+<p>On the right we have the 31 architectural integer register and the 32 floating point registers. If the commitQ is empty
+(after a trap for example) then they will contain the exact state of the machine.</p>
+
+<p>The commit registers are each staticly bound to one commitQ entry.</p>
+
+<p>When an instruction-bundle leaves the decode stage it contains the architectural register numbers of its source
+and destination registers, the renamer pipe stage assigns a commitQ entry (and therefore a commit register) to
+each instruction and tags its output register to be that commit register.</p>
+
+<p>The renamer also keeps a table of the latest 
+commit register that each architectural register is bound to (if any) - it uses these tables to point each source
+register to either a particular commit register or an architectural register.</p>
+
+<h3 id="execution">Execution</h3>
+
+<p>Once an instruction-bundle is in the commitQ it can’t be assigned an ALU until each of its source registers
+is either an architectural register or it’s a commit register that has reached the ‘completed’ state (ie it’s
+either in a commit register, or is being written to one and can be bypassed). Once a commitQ entry is in this state
+it goes into contention to be assigned an ALU and will execute ASAP.</p>
+
+<p>Once a commitQ entry has been executed its result goes into its associated commit register, and the commitQ
+entry waits until it can be committed</p>
+
+<p>Each commitQ entry is continually watching the state of it’s source registers, if one of them moves from the commitQ
+to the architectural registers it updates the source register it will use when executing.</p>
+
+<h3 id="completion">Completion</h3>
+
+<p>In every clock the CPU looks at the first 8 entries in the commitQ, it takes the first N contiguous entries 
+that are completed, marks them ‘committed’ and removes them from the queue.</p>
+
+<p>Committing an entry causes 
+its associated commit register to be written back into the architectural registers (if multiple commit entries
+write the same architectural register only the last one succeeds). It also releases any store instructions
+in the load-store unit’s write buffer to be actually written to caches or IO space.</p>
+
+<h3 id="speculative-misses">Speculative Misses</h3>
+
+<p>As mentioned above when a branch instruction hits a branch ALU and is discovered to have been mispredicted - either a 
+conditional branch where the condition was mispredicted, or an indirect branch where the destination was mispredicted - then
+the instructions in the commitQ after the mispredicted instruction are discarded and the instruction fetcher
+starts filling again from that new address.</p>
+
+<p>While this is happening the renamer must update its state, to reflect the new truncated commitQ.</p>
+
+<p>Branch instructions effectively act as barriers in the commitQ, until they are resolved into the completed
+state (ie their speculative state has been resolved) instructions after them cannot be committed - which means that
+their commit registers can’t be written into the architectural registers, and data waiting to be stored into cache or main memory
+can’t be written.</p>
+
+<p>However instructions after an unresolved branch can still be executed (out of order) using the results of
+other speculative operations from their commit registers. Speculative store instructions can 
+write data into the load-store unit’s write 
+queue, and speculative loads can also snoop that data from the write queue and from the cache - I’ll
+talk more about this in another blog post.</p>
+
+<p>Also branches can be executed out of order resulting in smaller/later portions of the commitQ being discarded.</p>
+
+<h3 id="traps-and-interrupts">Traps and Interrupts</h3>
+
+<p>Finally - the CSR ALU (containing the CSR registers and the trap and interrupt logic) is special - only
+an instruction at the very beginning of the commitQ can enter the CSR - that effectively means only one CSR/trap instruction
+can be committed in that clock (actually the next clock) this acts as a synchonising mechanism.</p>
+
+<p>Load/store traps (MMU/PMAP/etc) are generated by converting a load/store tagged instruction in the commitQ into a trap
+instruction.</p>
+
+<p>Fetch traps (again MMU/PMAP but also invalid instructions) are injected into the commitQ by the instruction fetcher
+and decoder which then stalls.</p>
+
+<p>Interrupts are treated much the same as fetch traps, they’re injected into the instruction stream which then stops
+fetching.</p>
+
+<p>When any of these hit the CSR unit all instructions prior to them have been executed and committed. They then trigger
+a full commitQ flush, throwing away all subsequent instructions in the queue.
+They then tell the fetcher to start fetching from a new address.</p>
+
+<p>Some other CSR ALU operations also generate commitQ flushes: some of the MMU flush operations, loading page tables, fence.i etc. We also optimise interrupts that occur when you write a register to unmask interrupts and make them synchronous (so that we don’t end up executing a few instructions after changing the state).</p>
+
+<h3 id="to-recap">To Recap</h3>
+<p>The important ideas here:</p>
+
+<ul>
+  <li>we have two register files one for speculative results, one for the architectural registers</li>
+  <li>our commitQ is an in-order list of instructions to execute</li>
+  <li>each commitQ entry has an associated output register for its speculative result</li>
+  <li>commitQ instructions are executed in any order</li>
+  <li>however instructions are committed/retired in chunks, in order</li>
+  <li>at that point their results are copied from the speculative commit registers to the architectural registers</li>
+  <li>badly speculated branches cause the parts of the commit Q after them to be discarded</li>
+</ul>
+
+<p>Next time: Memory Layout</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[Introduction This week we’re going to try and explain as simply as possible how our core architecture works. Here’s an overview of the system: The core structure is a first-in-first out queue called the ‘commitQ’. Instruction-bundles are inserted in-order at one end, and removed in-order at the other end once they have been committed. While in the commitQ instructions can be executed in any order (with some limits like memory aliasing for load/store instructions). At any time, if a branch instruction is discovered to have been wrongly predicted, the instructions following it in the queue will be discarded. A note on terminology - previously I’ve referred to ‘decode-bundle’s which are a bunch of bytes fetched from the i-cache and fed to the decoders. Here we talk about ‘instruction-bundle’s which are a bunch of data being passed around through the CPU representing an instruction and what it can do - data in an instruction-bundle includes its PC, its input/output registers, immediate constants, which ALU type it needs to be fed to, what operation will be performed on it there, etc. You can think of the decoders as taking a decode-bundle and producing 1-8 instruction-bundles per clock to feed to the renamer. Registers and Register Renaming We have a split register file: On the right we have the 31 architectural integer register and the 32 floating point registers. If the commitQ is empty (after a trap for example) then they will contain the exact state of the machine. The commit registers are each staticly bound to one commitQ entry. When an instruction-bundle leaves the decode stage it contains the architectural register numbers of its source and destination registers, the renamer pipe stage assigns a commitQ entry (and therefore a commit register) to each instruction and tags its output register to be that commit register. The renamer also keeps a table of the latest commit register that each architectural register is bound to (if any) - it uses these tables to point each source register to either a particular commit register or an architectural register. Execution Once an instruction-bundle is in the commitQ it can’t be assigned an ALU until each of its source registers is either an architectural register or it’s a commit register that has reached the ‘completed’ state (ie it’s either in a commit register, or is being written to one and can be bypassed). Once a commitQ entry is in this state it goes into contention to be assigned an ALU and will execute ASAP. Once a commitQ entry has been executed its result goes into its associated commit register, and the commitQ entry waits until it can be committed Each commitQ entry is continually watching the state of it’s source registers, if one of them moves from the commitQ to the architectural registers it updates the source register it will use when executing. Completion In every clock the CPU looks at the first 8 entries in the commitQ, it takes the first N contiguous entries that are completed, marks them ‘committed’ and removes them from the queue. Committing an entry causes its associated commit register to be written back into the architectural registers (if multiple commit entries write the same architectural register only the last one succeeds). It also releases any store instructions in the load-store unit’s write buffer to be actually written to caches or IO space. Speculative Misses As mentioned above when a branch instruction hits a branch ALU and is discovered to have been mispredicted - either a conditional branch where the condition was mispredicted, or an indirect branch where the destination was mispredicted - then the instructions in the commitQ after the mispredicted instruction are discarded and the instruction fetcher starts filling again from that new address. While this is happening the renamer must update its state, to reflect the new truncated commitQ. Branch instructions effectively act as barriers in the commitQ, until they are resolved into the completed state (ie their speculative state has been resolved) instructions after them cannot be committed - which means that their commit registers can’t be written into the architectural registers, and data waiting to be stored into cache or main memory can’t be written. However instructions after an unresolved branch can still be executed (out of order) using the results of other speculative operations from their commit registers. Speculative store instructions can write data into the load-store unit’s write queue, and speculative loads can also snoop that data from the write queue and from the cache - I’ll talk more about this in another blog post. Also branches can be executed out of order resulting in smaller/later portions of the commitQ being discarded. Traps and Interrupts Finally - the CSR ALU (containing the CSR registers and the trap and interrupt logic) is special - only an instruction at the very beginning of the commitQ can enter the CSR - that effectively means only one CSR/trap instruction can be committed in that clock (actually the next clock) this acts as a synchonising mechanism. Load/store traps (MMU/PMAP/etc) are generated by converting a load/store tagged instruction in the commitQ into a trap instruction. Fetch traps (again MMU/PMAP but also invalid instructions) are injected into the commitQ by the instruction fetcher and decoder which then stalls. Interrupts are treated much the same as fetch traps, they’re injected into the instruction stream which then stops fetching. When any of these hit the CSR unit all instructions prior to them have been executed and committed. They then trigger a full commitQ flush, throwing away all subsequent instructions in the queue. They then tell the fetcher to start fetching from a new address. Some other CSR ALU operations also generate commitQ flushes: some of the MMU flush operations, loading page tables, fence.i etc. We also optimise interrupts that occur when you write a register to unmask interrupts and make them synchronous (so that we don’t end up executing a few instructions after changing the state). To Recap The important ideas here: we have two register files one for speculative results, one for the architectural registers our commitQ is an in-order list of instructions to execute each commitQ entry has an associated output register for its speculative result commitQ instructions are executed in any order however instructions are committed/retired in chunks, in order at that point their results are copied from the speculative commit registers to the architectural registers badly speculated branches cause the parts of the commit Q after them to be discarded Next time: Memory Layout]]></summary></entry><entry><title type="html">VRoom! blog: Branch Target Cache [BTC] (part 3) Managing a speculative subroutine call stack</title><link href="http://localhost:4000/2021/11/20/btc-part3/" rel="alternate" type="text/html" title="VRoom! blog: Branch Target Cache [BTC] (part 3) Managing a speculative subroutine call stack" /><published>2021-11-20T00:00:00+13:00</published><updated>2021-11-20T00:00:00+13:00</updated><id>http://localhost:4000/2021/11/20/btc-part3</id><content type="html" xml:base="http://localhost:4000/2021/11/20/btc-part3/"><![CDATA[<p>This is the third of an occasional series of articles on the VRoom!/RVoom RISC-V 
+CPU. This week a shorter update, we’re going to talk about how we can create speculative entries 
+in the Branch Target Cache (BTC) call-return stack. A quick reminder of some of what we learned in the previous blog.</p>
+
+<ul>
+  <li>we decode large bundles of many instructions every clock</li>
+  <li>we predict bundles not instructions</li>
+  <li>we maintain a queue of pending uncommitted BTC predictions</li>
+  <li>each entry overrides the ones after it and the main tables</li>
+</ul>
+
+<h3 id="introduction">Introduction</h3>
+
+<p>Last time we talked about how we manage speculated branch target cache (BTC) entries, in short
+we have a queue of speculated BTC updates in front of the normal BTC tables, those entries are
+discarded or updated when a speculated branch is found to have been mispredicted, and retired into the
+main tables when a corresponding branch (or rather bundle of instructions) is committed.</p>
+
+<p><img src="/public/images/btc-queue.svg" alt="placeholder" title="Branch Target Cache example" /></p>
+
+<h3 id="subroutine-call-stack">Subroutine call stack</h3>
+
+<p>In addition to the standard BTC tables we also have a per-access mode call-return stack,
+RISC-V defines for us the instructions that should be used to infer these (and which not to),
+in the BTC we provide a 32-entry stack (smaller for M-mode) of the last 32 subroutine calls
+so we can predict the return address when decoding ret instructions (if we get it wrong it’s
+not the end of the world, it will be corrected when the ret instruction hits the branch ALU)</p>
+
+<p><img src="public/images/stack.svg" width="300" /></p>
+
+<p>Initially we thought we’d just tag branches with a pointer to the top-of stack, and wind it back when we got
+a misprediction, then we found out a case which turned out to have a particularly heavy impact on performance:</p>
+
+<pre>
+
+	.....
+	call	a
+r1:	call	b
+r2	....
+
+a:	bnez	a0, 1f		&lt; branch mispredicted
+	ret
+1:	....
+
+b:	....
+
+</pre>
+
+<p>essentially what happens here is that we speculatively fetch the following instruction stream:</p>
+
+<pre>
+	Instruction		call stack
+	===========		==========
+				
+
+	call	a		r1 -
+	bnez 	a0, 1f		r1 -	&lt; remembers TOS
+	ret			-	&lt; everything from here on is 
+	call	b		r2 -	  mispredicted
+	....				
+
+</pre>
+
+<p>Sometime later the bnez is resolved in the branch ALU and discovered to have been mispredicted. But by that point
+the return address ‘r1’ on the call stack has been popped and replaced with ‘r2’, even though we got the top of stack (TOS)
+correct, its contents are wrong, and can’t be undone when we discover the misprediction.
+This means that at some later time when we finally do return from subroutine ‘a’
+the prediction will be to ‘r2’ rather than ‘r1’ - this in turn will result in another misprediction when that return
+instruction hits the branch ALU, which is exactly what were were trying to avoid.</p>
+
+<h3 id="solution">Solution</h3>
+
+<p>Our solution is to take a similar approach to the one we took for the BTC tables and put a queue of prediction
+history in front of the call/return stack, in this case it’s a queue of push and pop 
+actions. Instead of being indexed by hashes of the PC/global history, it’s simply the TOS address that’s used instead.
+Top of stack always returns the latest push that matches the current TOS (and the top of the actual backing stack otherwise).</p>
+
+<p><img src="public/images/stack-queue.svg" width="400" /></p>
+
+<p>Like BTC speculative queue mentioned in the previous blog entry this queue is managed by the same bundle tag we
+attach to instructions in the commitQ - when a mispredicted branch instruction is discovered then the
+return stack speculative queue is truncated removing entries that correspond to the discarded instruction bundles
+and the TOS updated to the oldest retained entry.</p>
+
+<p>Similarly when the last instruction in an instruction bundle is committed then related  call-return stack
+speculative queue entries are
+tagged ‘committed’, and then written back in order into the call-return stack.</p>
+
+<h3 id="to-recap">To Recap</h3>
+<p>The important ideas here:</p>
+
+<ul>
+  <li>we have call-return stacks to predict the address of return instructions</li>
+  <li>we maintain a queue of speculative push/pop transitions</li>
+  <li>each entry overrides the ones after it and the main tables</li>
+  <li>the queue is flushed on a misprediction</li>
+  <li>committed data is pushed into the main tables</li>
+</ul>
+
+<p>Next time: How our main pipe works - an overview</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[This is the third of an occasional series of articles on the VRoom!/RVoom RISC-V CPU. This week a shorter update, we’re going to talk about how we can create speculative entries in the Branch Target Cache (BTC) call-return stack. A quick reminder of some of what we learned in the previous blog. we decode large bundles of many instructions every clock we predict bundles not instructions we maintain a queue of pending uncommitted BTC predictions each entry overrides the ones after it and the main tables Introduction Last time we talked about how we manage speculated branch target cache (BTC) entries, in short we have a queue of speculated BTC updates in front of the normal BTC tables, those entries are discarded or updated when a speculated branch is found to have been mispredicted, and retired into the main tables when a corresponding branch (or rather bundle of instructions) is committed. Subroutine call stack In addition to the standard BTC tables we also have a per-access mode call-return stack, RISC-V defines for us the instructions that should be used to infer these (and which not to), in the BTC we provide a 32-entry stack (smaller for M-mode) of the last 32 subroutine calls so we can predict the return address when decoding ret instructions (if we get it wrong it’s not the end of the world, it will be corrected when the ret instruction hits the branch ALU) Initially we thought we’d just tag branches with a pointer to the top-of stack, and wind it back when we got a misprediction, then we found out a case which turned out to have a particularly heavy impact on performance: ..... call a r1: call b r2 .... a: bnez a0, 1f &lt; branch mispredicted ret 1: .... b: .... essentially what happens here is that we speculatively fetch the following instruction stream: Instruction call stack =========== ========== call a r1 - bnez a0, 1f r1 - &lt; remembers TOS ret - &lt; everything from here on is call b r2 - mispredicted .... Sometime later the bnez is resolved in the branch ALU and discovered to have been mispredicted. But by that point the return address ‘r1’ on the call stack has been popped and replaced with ‘r2’, even though we got the top of stack (TOS) correct, its contents are wrong, and can’t be undone when we discover the misprediction. This means that at some later time when we finally do return from subroutine ‘a’ the prediction will be to ‘r2’ rather than ‘r1’ - this in turn will result in another misprediction when that return instruction hits the branch ALU, which is exactly what were were trying to avoid. Solution Our solution is to take a similar approach to the one we took for the BTC tables and put a queue of prediction history in front of the call/return stack, in this case it’s a queue of push and pop actions. Instead of being indexed by hashes of the PC/global history, it’s simply the TOS address that’s used instead. Top of stack always returns the latest push that matches the current TOS (and the top of the actual backing stack otherwise). Like BTC speculative queue mentioned in the previous blog entry this queue is managed by the same bundle tag we attach to instructions in the commitQ - when a mispredicted branch instruction is discovered then the return stack speculative queue is truncated removing entries that correspond to the discarded instruction bundles and the TOS updated to the oldest retained entry. Similarly when the last instruction in an instruction bundle is committed then related call-return stack speculative queue entries are tagged ‘committed’, and then written back in order into the call-return stack. To Recap The important ideas here: we have call-return stacks to predict the address of return instructions we maintain a queue of speculative push/pop transitions each entry overrides the ones after it and the main tables the queue is flushed on a misprediction committed data is pushed into the main tables Next time: How our main pipe works - an overview]]></summary></entry><entry><title type="html">VRoom! blog: Branch Target Cache [BTC] (part 2) Living in a Speculative World</title><link href="http://localhost:4000/2021/11/14/btc-part2/" rel="alternate" type="text/html" title="VRoom! blog: Branch Target Cache [BTC] (part 2) Living in a Speculative World" /><published>2021-11-14T00:00:00+13:00</published><updated>2021-11-14T00:00:00+13:00</updated><id>http://localhost:4000/2021/11/14/btc-part2</id><content type="html" xml:base="http://localhost:4000/2021/11/14/btc-part2/"><![CDATA[<p>This is the second of an occasional series of articles on the VRoom!/RVoom RISC-V 
+CPU. This week we’re going to talk about how we can create speculative entries 
+in the Branch Target Cache (BTC). A quick reminder of some of what we learned in the previous blog.</p>
+
+<ul>
+  <li>we decode large bundles of many instructions every clock</li>
+  <li>we predict bundles not instructions</li>
+</ul>
+
+<h3 id="system-architecture">System Architecture</h3>
+
+<p>Let’s have a look at an overview of our system architecture:</p>
+
+<p><img src="/talk/assets/overview.svg" alt="placeholder" title="System Architecture" /></p>
+
+<p>Instructions are fetched from the instruction cache (I$1), decoded, renamed to commit registers and entered
+into the commitQ. Once in the commitQ instructions can be executed in any order and even after they are
+executed they can be discarded by a trap or a preceding mispredicted branch.</p>
+
+<p>At the end of the commitQ are committed instructions, when they and all instructions before them are done, all
+branches are correctly predicted, there are no pending traps, then the CPU will retire up to the last 8 
+committed instructions per clock.</p>
+
+<h3 id="btc-operations">BTC Operations</h3>
+
+<p>Our BTC contains tables that are accessed using hashes constructed from the program counter (PC) and a
+global history. On a traditional system the BTC tables and global history would be updated on every 
+clock, In VROOM! we can have many instructions outstanding, often they are speculative instructions
+that may never be committed - when a branch instruction is processed by the branch ALU and is discovered to have been
+speculated incorrectly it can trigger
+the discard of subsequent speculative instructions (including other branch instructions), branch instructions can
+also be processed out of order.</p>
+
+<p>Processing branch instructions is important, we want to use branch mis-predictions to update the BTC tables - if
+we assumed that a branch would be taken and it wasn’t we need to back out and change the value that we had 
+previously set them too.</p>
+
+<p>A simple solution (and the one that we originally tried) was to wait until the commit stage of the CPU
+and then only use instructions that have been committed (and branches that have been resolved) to update the BTC tables.
+It works, but it’s very slow to update (remember that a big version of our CPU can have ~150 instructions in flight at
+once). Consider something like this:</p>
+
+<pre>
+clear:
+1:	std	x0, (a0)
+	add	a0, a0, 8
+	add	a1, a1, -1
+	bnez	a1, 1b
+	ret
+</pre>
+
+<p>The core of this is a single decode-bundle that always loops and contains 4 instruction in its core.
+The CPU may push 150/4 = 30+ bundles, 30 times around the loop, before we can start updating the
+BTC - this is particularly a problem with global history predictors which to be useful really to be updated 
+on every prediction.</p>
+
+<h3 id="a-better-solution">A better solution</h3>
+
+<p>Let’s look at how our BTC works:</p>
+
+<p><img src="/public/images/btc.svg" alt="placeholder" title="Branch Target Cache example" /></p>
+
+<p>The PC and the global history (a bit vector) are hashed (just some xors and bit swapping) into indexes into the 3
+BTC tables, they’re used to look up the 3 tables. The combined output is used to choose whether the bimodal or
+global history predictor is best for a particular bundle.</p>
+
+<p>Our solution to the above problems is to create a ‘pending prediction’ queue in front of the normal BTC tables. Each
+entry contains the information about a bundle prediction. Including the PC used for it and the global history at the
+point that it was created.
+Newer predictions are performed by looking into the queue from
+most recent to oldest for each of the 3 hashes (individually and independently) comparing them with the hashes of the
+PC and global history generated in each entry, if no match is found then the value from the main tables is used.</p>
+
+<p><img src="/public/images/btc-queue.svg" alt="placeholder" title="Branch Target Cache example" /></p>
+
+<p>The per-bundle BTC pending prediction queue acts similarly to the main per-instruction commitQ - in this case
+each instruction in the commitQ carries a reference to the decode-bundle it came from.</p>
+
+<h3 id="actions">Actions</h3>
+
+<p>If a branch instruction in the commitQ is discovered to be mispredicted
+all the instructions following it are discarded. At the same time entries in the BTC
+prediction queue that are newer than the bundle corresponding to  the mispredicted instruction are also discarded, and the
+prediction queue entry that does correspond to the mispredicted branch has its data updated. Finally that prediction queue’s
+copy of the global history along with the new branch information is used to reload the global history
+vector used for the next BTC prediction.</p>
+
+<p>Finally each BTC pending queue entry has a ‘committed’ bit - it gets set when all the instructions in the corresponding
+bundle hit the commit state in the commitQ, that means none of them will be mispredicted, or already have been.
+On every clock if the oldest entry in the BTC pending queue has its committed bit set then its data is copied back into the main BTC tables.</p>
+
+<h3 id="to-recap">To Recap</h3>
+<p>The important ideas here:</p>
+
+<ul>
+  <li>we maintain a queue of pending uncommitted BTC predictions</li>
+  <li>each entry overrides the ones after it and the main tables</li>
+  <li>the queue is flushed and the top entry updated on a misprediction</li>
+  <li>committed data is pushed into the main tables</li>
+</ul>
+
+<p>Next time: BTC (Part 3) Predicting Subroutine Returns</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[This is the second of an occasional series of articles on the VRoom!/RVoom RISC-V CPU. This week we’re going to talk about how we can create speculative entries in the Branch Target Cache (BTC). A quick reminder of some of what we learned in the previous blog. we decode large bundles of many instructions every clock we predict bundles not instructions System Architecture Let’s have a look at an overview of our system architecture: Instructions are fetched from the instruction cache (I$1), decoded, renamed to commit registers and entered into the commitQ. Once in the commitQ instructions can be executed in any order and even after they are executed they can be discarded by a trap or a preceding mispredicted branch. At the end of the commitQ are committed instructions, when they and all instructions before them are done, all branches are correctly predicted, there are no pending traps, then the CPU will retire up to the last 8 committed instructions per clock. BTC Operations Our BTC contains tables that are accessed using hashes constructed from the program counter (PC) and a global history. On a traditional system the BTC tables and global history would be updated on every clock, In VROOM! we can have many instructions outstanding, often they are speculative instructions that may never be committed - when a branch instruction is processed by the branch ALU and is discovered to have been speculated incorrectly it can trigger the discard of subsequent speculative instructions (including other branch instructions), branch instructions can also be processed out of order. Processing branch instructions is important, we want to use branch mis-predictions to update the BTC tables - if we assumed that a branch would be taken and it wasn’t we need to back out and change the value that we had previously set them too. A simple solution (and the one that we originally tried) was to wait until the commit stage of the CPU and then only use instructions that have been committed (and branches that have been resolved) to update the BTC tables. It works, but it’s very slow to update (remember that a big version of our CPU can have ~150 instructions in flight at once). Consider something like this: clear: 1: std x0, (a0) add a0, a0, 8 add a1, a1, -1 bnez a1, 1b ret The core of this is a single decode-bundle that always loops and contains 4 instruction in its core. The CPU may push 150/4 = 30+ bundles, 30 times around the loop, before we can start updating the BTC - this is particularly a problem with global history predictors which to be useful really to be updated on every prediction. A better solution Let’s look at how our BTC works: The PC and the global history (a bit vector) are hashed (just some xors and bit swapping) into indexes into the 3 BTC tables, they’re used to look up the 3 tables. The combined output is used to choose whether the bimodal or global history predictor is best for a particular bundle. Our solution to the above problems is to create a ‘pending prediction’ queue in front of the normal BTC tables. Each entry contains the information about a bundle prediction. Including the PC used for it and the global history at the point that it was created. Newer predictions are performed by looking into the queue from most recent to oldest for each of the 3 hashes (individually and independently) comparing them with the hashes of the PC and global history generated in each entry, if no match is found then the value from the main tables is used. The per-bundle BTC pending prediction queue acts similarly to the main per-instruction commitQ - in this case each instruction in the commitQ carries a reference to the decode-bundle it came from. Actions If a branch instruction in the commitQ is discovered to be mispredicted all the instructions following it are discarded. At the same time entries in the BTC prediction queue that are newer than the bundle corresponding to the mispredicted instruction are also discarded, and the prediction queue entry that does correspond to the mispredicted branch has its data updated. Finally that prediction queue’s copy of the global history along with the new branch information is used to reload the global history vector used for the next BTC prediction. Finally each BTC pending queue entry has a ‘committed’ bit - it gets set when all the instructions in the corresponding bundle hit the commit state in the commitQ, that means none of them will be mispredicted, or already have been. On every clock if the oldest entry in the BTC pending queue has its committed bit set then its data is copied back into the main BTC tables. To Recap The important ideas here: we maintain a queue of pending uncommitted BTC predictions each entry overrides the ones after it and the main tables the queue is flushed and the top entry updated on a misprediction committed data is pushed into the main tables Next time: BTC (Part 3) Predicting Subroutine Returns]]></summary></entry></feed>
