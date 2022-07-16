@@ -100,6 +100,82 @@
   
   <div class="post">
     <h1 class="post-title">
+      <a href="/2022/01/16/virtual-memory/">
+        VRoom! blog&#58; Virtual Memory
+      </a>
+    </h1>
+
+    <span class="post-date">16 Jan 2022</span>
+
+    <h3 id="introduction">Introduction</h3>
+
+<p>Booting Linux isn’t going to work without some form of virtual memory, RISC-V has
+a well defined spec for VM, implementation isn’t hard - page tables are well defined,
+there’s nothing particularly unusual or surprising there</p>
+
+<h3 id="l1-tlbs">L1 TLBs</h3>
+
+<p>We have separate Instruction and Data level one TLBs, they’re fully associative which means that
+we’re not practically limited to power of two sizes (though currently they have 32 entries each),
+each entry contains a mapping between an ASID and upper bits of a virtual address and a physical
+address - we support the various sizes of pages (both in tags and data).</p>
+
+<p>A fully associative TLB with random replacement makes it harder for Meltdown/Spectre sorts of
+attacks to use TLB replacement to attack systems. On VROOM memory accesses that miss in the TLB never result in
+data cache changes.</p>
+
+<p>Since the ALUs, and in particular the memory and fetch units, are shared between HARTs (CPUs) in the same
+simultaneous multi-threaded core then so are the TLBs shared.  We need a way to distinguish mappings between HARTs - this implementation
+is simple, we reserve a portion of the ASID which is forced to a unique value for each core - each HART thinks it has N bits of ASID, in reality there are N+1. There’s also
+a system flag that we can optionally set that lets SMT HARTs share the full sized ASID (provided the software understands
+that ASIDs are system rather than CPU global).</p>
+
+<p>Currently we use the old trick of doing L1 TLB lookup with the upper bits of a virtual address while using
+the lower bits in parallel to do the indexing of the L1 data/instruction caches - large modern cache line sizes 
+mean that you have to go many ways/sets to get large data and instruction caches - this also helps
+with Meltdown/Spectre/etc mitigation.</p>
+
+<p>I’m currently redesigning the whole memory datapath unit to split TLB lookup and data cache access
+into separate cycles - mostly to expose more parallelism during scheduling - more about that in
+a later posting once it’s all working.</p>
+
+<h3 id="l2-tlbs">L2 TLBs</h3>
+
+<p>TLB misses result in stalled instructions in the commitQ - there’s a small queue of pending TLB 
+lookups in the memory unit and 2 pending lookups in the fetch unit - they feed the table walker
+state machine which starts by dipping into the L2 TLB cache - currently it’s a 4-way 256 entry (so
+1k entries total) set associative cache shared between the instruction and data TLBs - TLB data found here is fed directly to the L1 TLBs (a satisfied L1 miss takes 4
+clocks).</p>
+
+<h3 id="table-walking">Table walking</h3>
+
+<p>If a request also misses in the L2 TLB cache the table walker state machine starts walking page table trees.</p>
+
+<p>Full
+cache lines of TLB data are fetched into a local read-only cache which contains a small number of entries,
+essentially enough for 1 line for each level in the page hierarchy, and 2 for the lowest level, repeated 
+for instruction TLB and the data TLB (then repeated again for multiple HARTs).</p>
+
+<p>After initial filling most table walks hit in this cache. This cache is slightly integrated into the data L1 I-cache, they share a 
+read-only access port into the cache coherency fabric, and both can be invalidated by data cache snoops shootdowns.</p>
+
+<h3 id="tlb-invalidation">TLB Invalidation</h3>
+
+<p>TLB invalidation is triggered by executing a TLB flush instruction - these instructions let the instructions
+before them in the commitQ execute before they themselves are executed.</p>
+
+<p>At this point they trigger a
+commitQ flush (tossing any speculative instructions executed with the old VM mappings). At the same time
+they trigger L1 and L2 TLB flushes. Note: there is no need to invalidate the TLB walker’s small data cache
+as it will have been invalidated (shot down) by the cache coherency protocols if any page tables were
+changed in the process.</p>
+
+<p>Next time: (Once I get it working) Data memory accesses</p>
+
+  </div>
+  
+  <div class="post">
+    <h1 class="post-title">
       <a href="/2021/12/19/building-on-AWS/">
         VRoom! blog&#58; Building on AWS
       </a>
@@ -529,120 +605,6 @@ tagged ‘committed’, and then written back in order into the call-return stac
 </ul>
 
 <p>Next time: How our main pipe works - an overview</p>
-
-  </div>
-  
-  <div class="post">
-    <h1 class="post-title">
-      <a href="/2021/11/14/btc-part2/">
-        VRoom! blog&#58; Branch Target Cache [BTC] (part 2) Living in a Speculative World
-      </a>
-    </h1>
-
-    <span class="post-date">14 Nov 2021</span>
-
-    <p>This is the second of an occasional series of articles on the VRoom!/RVoom RISC-V 
-CPU. This week we’re going to talk about how we can create speculative entries 
-in the Branch Target Cache (BTC). A quick reminder of some of what we learned in the previous blog.</p>
-
-<ul>
-  <li>we decode large bundles of many instructions every clock</li>
-  <li>we predict bundles not instructions</li>
-</ul>
-
-<h3 id="system-architecture">System Architecture</h3>
-
-<p>Let’s have a look at an overview of our system architecture:</p>
-
-<p><img src="/talk/assets/overview.svg" alt="placeholder" title="System Architecture" /></p>
-
-<p>Instructions are fetched from the instruction cache (I$1), decoded, renamed to commit registers and entered
-into the commitQ. Once in the commitQ instructions can be executed in any order and even after they are
-executed they can be discarded by a trap or a preceding mispredicted branch.</p>
-
-<p>At the end of the commitQ are committed instructions, when they and all instructions before them are done, all
-branches are correctly predicted, there are no pending traps, then the CPU will retire up to the last 8 
-committed instructions per clock.</p>
-
-<h3 id="btc-operations">BTC Operations</h3>
-
-<p>Our BTC contains tables that are accessed using hashes constructed from the program counter (PC) and a
-global history. On a traditional system the BTC tables and global history would be updated on every 
-clock, In VROOM! we can have many instructions outstanding, often they are speculative instructions
-that may never be committed - when a branch instruction is processed by the branch ALU and is discovered to have been
-speculated incorrectly it can trigger
-the discard of subsequent speculative instructions (including other branch instructions), branch instructions can
-also be processed out of order.</p>
-
-<p>Processing branch instructions is important, we want to use branch mis-predictions to update the BTC tables - if
-we assumed that a branch would be taken and it wasn’t we need to back out and change the value that we had 
-previously set them too.</p>
-
-<p>A simple solution (and the one that we originally tried) was to wait until the commit stage of the CPU
-and then only use instructions that have been committed (and branches that have been resolved) to update the BTC tables.
-It works, but it’s very slow to update (remember that a big version of our CPU can have ~150 instructions in flight at
-once). Consider something like this:</p>
-
-<pre>
-clear:
-1:	std	x0, (a0)
-	add	a0, a0, 8
-	add	a1, a1, -1
-	bnez	a1, 1b
-	ret
-</pre>
-
-<p>The core of this is a single decode-bundle that always loops and contains 4 instruction in its core.
-The CPU may push 150/4 = 30+ bundles, 30 times around the loop, before we can start updating the
-BTC - this is particularly a problem with global history predictors which to be useful really to be updated 
-on every prediction.</p>
-
-<h3 id="a-better-solution">A better solution</h3>
-
-<p>Let’s look at how our BTC works:</p>
-
-<p><img src="/public/images/btc.svg" alt="placeholder" title="Branch Target Cache example" /></p>
-
-<p>The PC and the global history (a bit vector) are hashed (just some xors and bit swapping) into indexes into the 3
-BTC tables, they’re used to look up the 3 tables. The combined output is used to choose whether the bimodal or
-global history predictor is best for a particular bundle.</p>
-
-<p>Our solution to the above problems is to create a ‘pending prediction’ queue in front of the normal BTC tables. Each
-entry contains the information about a bundle prediction. Including the PC used for it and the global history at the
-point that it was created.
-Newer predictions are performed by looking into the queue from
-most recent to oldest for each of the 3 hashes (individually and independently) comparing them with the hashes of the
-PC and global history generated in each entry, if no match is found then the value from the main tables is used.</p>
-
-<p><img src="/public/images/btc-queue.svg" alt="placeholder" title="Branch Target Cache example" /></p>
-
-<p>The per-bundle BTC pending prediction queue acts similarly to the main per-instruction commitQ - in this case
-each instruction in the commitQ carries a reference to the decode-bundle it came from.</p>
-
-<h3 id="actions">Actions</h3>
-
-<p>If a branch instruction in the commitQ is discovered to be mispredicted
-all the instructions following it are discarded. At the same time entries in the BTC
-prediction queue that are newer than the bundle corresponding to  the mispredicted instruction are also discarded, and the
-prediction queue entry that does correspond to the mispredicted branch has its data updated. Finally that prediction queue’s
-copy of the global history along with the new branch information is used to reload the global history
-vector used for the next BTC prediction.</p>
-
-<p>Finally each BTC pending queue entry has a ‘committed’ bit - it gets set when all the instructions in the corresponding
-bundle hit the commit state in the commitQ, that means none of them will be mispredicted, or already have been.
-On every clock if the oldest entry in the BTC pending queue has its committed bit set then its data is copied back into the main BTC tables.</p>
-
-<h3 id="to-recap">To Recap</h3>
-<p>The important ideas here:</p>
-
-<ul>
-  <li>we maintain a queue of pending uncommitted BTC predictions</li>
-  <li>each entry overrides the ones after it and the main tables</li>
-  <li>the queue is flushed and the top entry updated on a misprediction</li>
-  <li>committed data is pushed into the main tables</li>
-</ul>
-
-<p>Next time: BTC (Part 3) Predicting Subroutine Returns</p>
 
   </div>
   

@@ -4,13 +4,79 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2022-05-01T11:48:31+12:00</updated>
+ <updated>2022-07-16T15:56:44+12:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
    <email></email>
  </author>
 
+ 
+ <entry>
+   <title>VRoom! blog&#58; Trace cache - Part 2</title>
+   <link href="http://localhost:4000/2022/07/14/trace-part2/"/>
+   <updated>2022-07-14T00:00:00+12:00</updated>
+   <id>http://localhost:4000/2022/07/14/trace-part2</id>
+   <content type="html">&lt;h3 id=&quot;introduction&quot;&gt;Introduction&lt;/h3&gt;
+
+&lt;p&gt;It’s been a couple of months since I last posted about our work on a trace cache for VRroom, it’s
+become a bit of slog - trace cache bugs are the worst: suddenly out of nowhere your code branches off
+into the weeds, often caused by something that happened tens of thousands of clocks before. Short 
+story, we’re pausing work on my trace cache implementation to get more important stuff done, long story: well read on&lt;/p&gt;
+
+&lt;h3 id=&quot;what-is-good-about-our-current-trace-cache&quot;&gt;What is good about our current Trace Cache?&lt;/h3&gt;
+
+&lt;p&gt;You’ll remember from the previous blog post about our trace cache that it’s pretty simple, the idea
+was to bolt on a direct mapped cache filled with traces extracted from the completion end of our commit engine
+that competed with the normal icache/branch-predictor/PC/decoder to provide decoded data directly to the 
+rename units.&lt;/p&gt;
+
+&lt;p&gt;After the last blog post we integrated support to avoid traces from crossing instruction call/return 
+transitions, this preserved the call prediction stacks in the BTC and made overall performance 
+in the same ballpark as the existing performance.&lt;/p&gt;
+
+&lt;p&gt;Now that is up and working, it passes all our sanity tests, direct examination of the pipelines shows a higher
+issue rate (8 instructions per clock regularly which was the goal) but with a higher stall rate (because the ALUs are busy and the commit queue is filling) - which indicates that a well working trace cache probably
+needs an increase in the number of ALUs and/or load/store units to further increase performance - that in
+itself is not a bad thing it means we have more performance choices when choosing a final architecture.&lt;/p&gt;
+
+&lt;h3 id=&quot;what-is-bad-about-our-current-trace-cache&quot;&gt;What is bad about our current Trace Cache?&lt;/h3&gt;
+
+&lt;p&gt;However while the back end pipelines are performing better the one bad thing that benchmarks show is that because
+our naive direct mapped trace cache bypasses the branch predictor and as a result it performs worse (about 15% worse) on
+branch prediction - you will recall we’re using a traditional dual combined branch predictor (bimodal and global history) - the trace
+cache is effectively embedding the bimodal BTC data in the cache, but not the global predictor data.&lt;/p&gt;
+
+&lt;p&gt;What we really need is a way to incorporate the global predictor into the trace cache tags, that way we
+can collect multiple traces for the same starting PC address (there are lots of examples of this in the
+literature on trace caches, it’s not a new idea).&lt;/p&gt;
+
+&lt;p&gt;This is not a trivial change, it means pulling apart the BTC and PC fetcher code and more closely 
+integrating the trace cache at a lower level - the BTC needs to be able to track both trace streams and icache streams to update its predictors from both sources - the current BTC/PC fetcher are very focused 
+on icache boundaries and predicting multiple branches within them, the data coming out of the trace cache
+tends to have arbitrary PC boundaries, and has unconditional branches elided - merging them more
+than we currently have is a non trivial piece of work.&lt;/p&gt;
+
+&lt;p&gt;Note that getting a direct mapped trace cache to ~5/6 the performance of the existing CPU is actually not
+that bad - it means we’re on the right track, just not there yet.&lt;/p&gt;
+
+&lt;h3 id=&quot;conclusion&quot;&gt;Conclusion&lt;/h3&gt;
+
+&lt;p&gt;Our basic trace cache design seems to be functional, but doesn’t perform well enough yet - short to medium
+term it’s become a bit derail against making other progress so we’re going to set it aside for the moment,
+probably until
+the next time the BTC has been opened up and is spread over the desktop for some major rearrangement and
+then dig into integrating global history into the trace cache tags and BTC predictor updates from trace data.&lt;/p&gt;
+
+&lt;p&gt;This is not the last we’ve seen of the trace cache.&lt;/p&gt;
+
+&lt;p&gt;Our next work - some simple work on optimising moves and 0ing of registers - some minor instruction recognition
+in the renamer will allow commit Q entries to resolve earlier (more in parallel) reducing instruction
+dependencies on the fly.&lt;/p&gt;
+
+&lt;p&gt;Next time: Simple Renamer Optimisations&lt;/p&gt;
+</content>
+ </entry>
  
  <entry>
    <title>VRoom! blog&#58; Trace cache - Part 1</title>

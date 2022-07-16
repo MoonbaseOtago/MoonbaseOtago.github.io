@@ -1,4 +1,61 @@
-<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="4.2.1">Jekyll</generator><link href="http://localhost:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/" rel="alternate" type="text/html" /><updated>2022-05-01T11:48:31+12:00</updated><id>http://localhost:4000/feed.xml</id><title type="html">VRoom!</title><subtitle>Very high end RISC-V implementation, cloud server class, out of order, super scalar, speculative, up to 8 IPC</subtitle><author><name>Paul Campbell</name></author><entry><title type="html">VRoom! blog: Trace cache - Part 1</title><link href="http://localhost:4000/2022/04/30/trace-part1/" rel="alternate" type="text/html" title="VRoom! blog: Trace cache - Part 1" /><published>2022-04-30T00:00:00+12:00</published><updated>2022-04-30T00:00:00+12:00</updated><id>http://localhost:4000/2022/04/30/trace-part1</id><content type="html" xml:base="http://localhost:4000/2022/04/30/trace-part1/"><![CDATA[<h3 id="introduction">Introduction</h3>
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="4.2.1">Jekyll</generator><link href="http://localhost:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/" rel="alternate" type="text/html" /><updated>2022-07-16T15:56:44+12:00</updated><id>http://localhost:4000/feed.xml</id><title type="html">VRoom!</title><subtitle>Very high end RISC-V implementation, cloud server class, out of order, super scalar, speculative, up to 8 IPC</subtitle><author><name>Paul Campbell</name></author><entry><title type="html">VRoom! blog: Trace cache - Part 2</title><link href="http://localhost:4000/2022/07/14/trace-part2/" rel="alternate" type="text/html" title="VRoom! blog: Trace cache - Part 2" /><published>2022-07-14T00:00:00+12:00</published><updated>2022-07-14T00:00:00+12:00</updated><id>http://localhost:4000/2022/07/14/trace-part2</id><content type="html" xml:base="http://localhost:4000/2022/07/14/trace-part2/"><![CDATA[<h3 id="introduction">Introduction</h3>
+
+<p>It’s been a couple of months since I last posted about our work on a trace cache for VRroom, it’s
+become a bit of slog - trace cache bugs are the worst: suddenly out of nowhere your code branches off
+into the weeds, often caused by something that happened tens of thousands of clocks before. Short 
+story, we’re pausing work on my trace cache implementation to get more important stuff done, long story: well read on</p>
+
+<h3 id="what-is-good-about-our-current-trace-cache">What is good about our current Trace Cache?</h3>
+
+<p>You’ll remember from the previous blog post about our trace cache that it’s pretty simple, the idea
+was to bolt on a direct mapped cache filled with traces extracted from the completion end of our commit engine
+that competed with the normal icache/branch-predictor/PC/decoder to provide decoded data directly to the 
+rename units.</p>
+
+<p>After the last blog post we integrated support to avoid traces from crossing instruction call/return 
+transitions, this preserved the call prediction stacks in the BTC and made overall performance 
+in the same ballpark as the existing performance.</p>
+
+<p>Now that is up and working, it passes all our sanity tests, direct examination of the pipelines shows a higher
+issue rate (8 instructions per clock regularly which was the goal) but with a higher stall rate (because the ALUs are busy and the commit queue is filling) - which indicates that a well working trace cache probably
+needs an increase in the number of ALUs and/or load/store units to further increase performance - that in
+itself is not a bad thing it means we have more performance choices when choosing a final architecture.</p>
+
+<h3 id="what-is-bad-about-our-current-trace-cache">What is bad about our current Trace Cache?</h3>
+
+<p>However while the back end pipelines are performing better the one bad thing that benchmarks show is that because
+our naive direct mapped trace cache bypasses the branch predictor and as a result it performs worse (about 15% worse) on
+branch prediction - you will recall we’re using a traditional dual combined branch predictor (bimodal and global history) - the trace
+cache is effectively embedding the bimodal BTC data in the cache, but not the global predictor data.</p>
+
+<p>What we really need is a way to incorporate the global predictor into the trace cache tags, that way we
+can collect multiple traces for the same starting PC address (there are lots of examples of this in the
+literature on trace caches, it’s not a new idea).</p>
+
+<p>This is not a trivial change, it means pulling apart the BTC and PC fetcher code and more closely 
+integrating the trace cache at a lower level - the BTC needs to be able to track both trace streams and icache streams to update its predictors from both sources - the current BTC/PC fetcher are very focused 
+on icache boundaries and predicting multiple branches within them, the data coming out of the trace cache
+tends to have arbitrary PC boundaries, and has unconditional branches elided - merging them more
+than we currently have is a non trivial piece of work.</p>
+
+<p>Note that getting a direct mapped trace cache to ~5/6 the performance of the existing CPU is actually not
+that bad - it means we’re on the right track, just not there yet.</p>
+
+<h3 id="conclusion">Conclusion</h3>
+
+<p>Our basic trace cache design seems to be functional, but doesn’t perform well enough yet - short to medium
+term it’s become a bit derail against making other progress so we’re going to set it aside for the moment,
+probably until
+the next time the BTC has been opened up and is spread over the desktop for some major rearrangement and
+then dig into integrating global history into the trace cache tags and BTC predictor updates from trace data.</p>
+
+<p>This is not the last we’ve seen of the trace cache.</p>
+
+<p>Our next work - some simple work on optimising moves and 0ing of registers - some minor instruction recognition
+in the renamer will allow commit Q entries to resolve earlier (more in parallel) reducing instruction
+dependencies on the fly.</p>
+
+<p>Next time: Simple Renamer Optimisations</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[Introduction It’s been a couple of months since I last posted about our work on a trace cache for VRroom, it’s become a bit of slog - trace cache bugs are the worst: suddenly out of nowhere your code branches off into the weeds, often caused by something that happened tens of thousands of clocks before. Short story, we’re pausing work on my trace cache implementation to get more important stuff done, long story: well read on What is good about our current Trace Cache? You’ll remember from the previous blog post about our trace cache that it’s pretty simple, the idea was to bolt on a direct mapped cache filled with traces extracted from the completion end of our commit engine that competed with the normal icache/branch-predictor/PC/decoder to provide decoded data directly to the rename units. After the last blog post we integrated support to avoid traces from crossing instruction call/return transitions, this preserved the call prediction stacks in the BTC and made overall performance in the same ballpark as the existing performance. Now that is up and working, it passes all our sanity tests, direct examination of the pipelines shows a higher issue rate (8 instructions per clock regularly which was the goal) but with a higher stall rate (because the ALUs are busy and the commit queue is filling) - which indicates that a well working trace cache probably needs an increase in the number of ALUs and/or load/store units to further increase performance - that in itself is not a bad thing it means we have more performance choices when choosing a final architecture. What is bad about our current Trace Cache? However while the back end pipelines are performing better the one bad thing that benchmarks show is that because our naive direct mapped trace cache bypasses the branch predictor and as a result it performs worse (about 15% worse) on branch prediction - you will recall we’re using a traditional dual combined branch predictor (bimodal and global history) - the trace cache is effectively embedding the bimodal BTC data in the cache, but not the global predictor data. What we really need is a way to incorporate the global predictor into the trace cache tags, that way we can collect multiple traces for the same starting PC address (there are lots of examples of this in the literature on trace caches, it’s not a new idea). This is not a trivial change, it means pulling apart the BTC and PC fetcher code and more closely integrating the trace cache at a lower level - the BTC needs to be able to track both trace streams and icache streams to update its predictors from both sources - the current BTC/PC fetcher are very focused on icache boundaries and predicting multiple branches within them, the data coming out of the trace cache tends to have arbitrary PC boundaries, and has unconditional branches elided - merging them more than we currently have is a non trivial piece of work. Note that getting a direct mapped trace cache to ~5/6 the performance of the existing CPU is actually not that bad - it means we’re on the right track, just not there yet. Conclusion Our basic trace cache design seems to be functional, but doesn’t perform well enough yet - short to medium term it’s become a bit derail against making other progress so we’re going to set it aside for the moment, probably until the next time the BTC has been opened up and is spread over the desktop for some major rearrangement and then dig into integrating global history into the trace cache tags and BTC predictor updates from trace data. This is not the last we’ve seen of the trace cache. Our next work - some simple work on optimising moves and 0ing of registers - some minor instruction recognition in the renamer will allow commit Q entries to resolve earlier (more in parallel) reducing instruction dependencies on the fly. Next time: Simple Renamer Optimisations]]></summary></entry><entry><title type="html">VRoom! blog: Trace cache - Part 1</title><link href="http://localhost:4000/2022/04/30/trace-part1/" rel="alternate" type="text/html" title="VRoom! blog: Trace cache - Part 1" /><published>2022-04-30T00:00:00+12:00</published><updated>2022-04-30T00:00:00+12:00</updated><id>http://localhost:4000/2022/04/30/trace-part1</id><content type="html" xml:base="http://localhost:4000/2022/04/30/trace-part1/"><![CDATA[<h3 id="introduction">Introduction</h3>
 
 <p>I’ve spent the past month working on adding a trace cache to VRoom! - it’s not done yet but is mildly
 functional. Here’s a quick write up of what I’ve done so far.</p>
@@ -1096,105 +1153,4 @@ tagged ‘committed’, and then written back in order into the call-return stac
   <li>committed data is pushed into the main tables</li>
 </ul>
 
-<p>Next time: How our main pipe works - an overview</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[This is the third of an occasional series of articles on the VRoom!/RVoom RISC-V CPU. This week a shorter update, we’re going to talk about how we can create speculative entries in the Branch Target Cache (BTC) call-return stack. A quick reminder of some of what we learned in the previous blog. we decode large bundles of many instructions every clock we predict bundles not instructions we maintain a queue of pending uncommitted BTC predictions each entry overrides the ones after it and the main tables Introduction Last time we talked about how we manage speculated branch target cache (BTC) entries, in short we have a queue of speculated BTC updates in front of the normal BTC tables, those entries are discarded or updated when a speculated branch is found to have been mispredicted, and retired into the main tables when a corresponding branch (or rather bundle of instructions) is committed. Subroutine call stack In addition to the standard BTC tables we also have a per-access mode call-return stack, RISC-V defines for us the instructions that should be used to infer these (and which not to), in the BTC we provide a 32-entry stack (smaller for M-mode) of the last 32 subroutine calls so we can predict the return address when decoding ret instructions (if we get it wrong it’s not the end of the world, it will be corrected when the ret instruction hits the branch ALU) Initially we thought we’d just tag branches with a pointer to the top-of stack, and wind it back when we got a misprediction, then we found out a case which turned out to have a particularly heavy impact on performance: ..... call a r1: call b r2 .... a: bnez a0, 1f &lt; branch mispredicted ret 1: .... b: .... essentially what happens here is that we speculatively fetch the following instruction stream: Instruction call stack =========== ========== call a r1 - bnez a0, 1f r1 - &lt; remembers TOS ret - &lt; everything from here on is call b r2 - mispredicted .... Sometime later the bnez is resolved in the branch ALU and discovered to have been mispredicted. But by that point the return address ‘r1’ on the call stack has been popped and replaced with ‘r2’, even though we got the top of stack (TOS) correct, its contents are wrong, and can’t be undone when we discover the misprediction. This means that at some later time when we finally do return from subroutine ‘a’ the prediction will be to ‘r2’ rather than ‘r1’ - this in turn will result in another misprediction when that return instruction hits the branch ALU, which is exactly what were were trying to avoid. Solution Our solution is to take a similar approach to the one we took for the BTC tables and put a queue of prediction history in front of the call/return stack, in this case it’s a queue of push and pop actions. Instead of being indexed by hashes of the PC/global history, it’s simply the TOS address that’s used instead. Top of stack always returns the latest push that matches the current TOS (and the top of the actual backing stack otherwise). Like BTC speculative queue mentioned in the previous blog entry this queue is managed by the same bundle tag we attach to instructions in the commitQ - when a mispredicted branch instruction is discovered then the return stack speculative queue is truncated removing entries that correspond to the discarded instruction bundles and the TOS updated to the oldest retained entry. Similarly when the last instruction in an instruction bundle is committed then related call-return stack speculative queue entries are tagged ‘committed’, and then written back in order into the call-return stack. To Recap The important ideas here: we have call-return stacks to predict the address of return instructions we maintain a queue of speculative push/pop transitions each entry overrides the ones after it and the main tables the queue is flushed on a misprediction committed data is pushed into the main tables Next time: How our main pipe works - an overview]]></summary></entry><entry><title type="html">VRoom! blog: Branch Target Cache [BTC] (part 2) Living in a Speculative World</title><link href="http://localhost:4000/2021/11/14/btc-part2/" rel="alternate" type="text/html" title="VRoom! blog: Branch Target Cache [BTC] (part 2) Living in a Speculative World" /><published>2021-11-14T00:00:00+13:00</published><updated>2021-11-14T00:00:00+13:00</updated><id>http://localhost:4000/2021/11/14/btc-part2</id><content type="html" xml:base="http://localhost:4000/2021/11/14/btc-part2/"><![CDATA[<p>This is the second of an occasional series of articles on the VRoom!/RVoom RISC-V 
-CPU. This week we’re going to talk about how we can create speculative entries 
-in the Branch Target Cache (BTC). A quick reminder of some of what we learned in the previous blog.</p>
-
-<ul>
-  <li>we decode large bundles of many instructions every clock</li>
-  <li>we predict bundles not instructions</li>
-</ul>
-
-<h3 id="system-architecture">System Architecture</h3>
-
-<p>Let’s have a look at an overview of our system architecture:</p>
-
-<p><img src="/talk/assets/overview.svg" alt="placeholder" title="System Architecture" /></p>
-
-<p>Instructions are fetched from the instruction cache (I$1), decoded, renamed to commit registers and entered
-into the commitQ. Once in the commitQ instructions can be executed in any order and even after they are
-executed they can be discarded by a trap or a preceding mispredicted branch.</p>
-
-<p>At the end of the commitQ are committed instructions, when they and all instructions before them are done, all
-branches are correctly predicted, there are no pending traps, then the CPU will retire up to the last 8 
-committed instructions per clock.</p>
-
-<h3 id="btc-operations">BTC Operations</h3>
-
-<p>Our BTC contains tables that are accessed using hashes constructed from the program counter (PC) and a
-global history. On a traditional system the BTC tables and global history would be updated on every 
-clock, In VROOM! we can have many instructions outstanding, often they are speculative instructions
-that may never be committed - when a branch instruction is processed by the branch ALU and is discovered to have been
-speculated incorrectly it can trigger
-the discard of subsequent speculative instructions (including other branch instructions), branch instructions can
-also be processed out of order.</p>
-
-<p>Processing branch instructions is important, we want to use branch mis-predictions to update the BTC tables - if
-we assumed that a branch would be taken and it wasn’t we need to back out and change the value that we had 
-previously set them too.</p>
-
-<p>A simple solution (and the one that we originally tried) was to wait until the commit stage of the CPU
-and then only use instructions that have been committed (and branches that have been resolved) to update the BTC tables.
-It works, but it’s very slow to update (remember that a big version of our CPU can have ~150 instructions in flight at
-once). Consider something like this:</p>
-
-<pre>
-clear:
-1:	std	x0, (a0)
-	add	a0, a0, 8
-	add	a1, a1, -1
-	bnez	a1, 1b
-	ret
-</pre>
-
-<p>The core of this is a single decode-bundle that always loops and contains 4 instruction in its core.
-The CPU may push 150/4 = 30+ bundles, 30 times around the loop, before we can start updating the
-BTC - this is particularly a problem with global history predictors which to be useful really to be updated 
-on every prediction.</p>
-
-<h3 id="a-better-solution">A better solution</h3>
-
-<p>Let’s look at how our BTC works:</p>
-
-<p><img src="/public/images/btc.svg" alt="placeholder" title="Branch Target Cache example" /></p>
-
-<p>The PC and the global history (a bit vector) are hashed (just some xors and bit swapping) into indexes into the 3
-BTC tables, they’re used to look up the 3 tables. The combined output is used to choose whether the bimodal or
-global history predictor is best for a particular bundle.</p>
-
-<p>Our solution to the above problems is to create a ‘pending prediction’ queue in front of the normal BTC tables. Each
-entry contains the information about a bundle prediction. Including the PC used for it and the global history at the
-point that it was created.
-Newer predictions are performed by looking into the queue from
-most recent to oldest for each of the 3 hashes (individually and independently) comparing them with the hashes of the
-PC and global history generated in each entry, if no match is found then the value from the main tables is used.</p>
-
-<p><img src="/public/images/btc-queue.svg" alt="placeholder" title="Branch Target Cache example" /></p>
-
-<p>The per-bundle BTC pending prediction queue acts similarly to the main per-instruction commitQ - in this case
-each instruction in the commitQ carries a reference to the decode-bundle it came from.</p>
-
-<h3 id="actions">Actions</h3>
-
-<p>If a branch instruction in the commitQ is discovered to be mispredicted
-all the instructions following it are discarded. At the same time entries in the BTC
-prediction queue that are newer than the bundle corresponding to  the mispredicted instruction are also discarded, and the
-prediction queue entry that does correspond to the mispredicted branch has its data updated. Finally that prediction queue’s
-copy of the global history along with the new branch information is used to reload the global history
-vector used for the next BTC prediction.</p>
-
-<p>Finally each BTC pending queue entry has a ‘committed’ bit - it gets set when all the instructions in the corresponding
-bundle hit the commit state in the commitQ, that means none of them will be mispredicted, or already have been.
-On every clock if the oldest entry in the BTC pending queue has its committed bit set then its data is copied back into the main BTC tables.</p>
-
-<h3 id="to-recap">To Recap</h3>
-<p>The important ideas here:</p>
-
-<ul>
-  <li>we maintain a queue of pending uncommitted BTC predictions</li>
-  <li>each entry overrides the ones after it and the main tables</li>
-  <li>the queue is flushed and the top entry updated on a misprediction</li>
-  <li>committed data is pushed into the main tables</li>
-</ul>
-
-<p>Next time: BTC (Part 3) Predicting Subroutine Returns</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[This is the second of an occasional series of articles on the VRoom!/RVoom RISC-V CPU. This week we’re going to talk about how we can create speculative entries in the Branch Target Cache (BTC). A quick reminder of some of what we learned in the previous blog. we decode large bundles of many instructions every clock we predict bundles not instructions System Architecture Let’s have a look at an overview of our system architecture: Instructions are fetched from the instruction cache (I$1), decoded, renamed to commit registers and entered into the commitQ. Once in the commitQ instructions can be executed in any order and even after they are executed they can be discarded by a trap or a preceding mispredicted branch. At the end of the commitQ are committed instructions, when they and all instructions before them are done, all branches are correctly predicted, there are no pending traps, then the CPU will retire up to the last 8 committed instructions per clock. BTC Operations Our BTC contains tables that are accessed using hashes constructed from the program counter (PC) and a global history. On a traditional system the BTC tables and global history would be updated on every clock, In VROOM! we can have many instructions outstanding, often they are speculative instructions that may never be committed - when a branch instruction is processed by the branch ALU and is discovered to have been speculated incorrectly it can trigger the discard of subsequent speculative instructions (including other branch instructions), branch instructions can also be processed out of order. Processing branch instructions is important, we want to use branch mis-predictions to update the BTC tables - if we assumed that a branch would be taken and it wasn’t we need to back out and change the value that we had previously set them too. A simple solution (and the one that we originally tried) was to wait until the commit stage of the CPU and then only use instructions that have been committed (and branches that have been resolved) to update the BTC tables. It works, but it’s very slow to update (remember that a big version of our CPU can have ~150 instructions in flight at once). Consider something like this: clear: 1: std x0, (a0) add a0, a0, 8 add a1, a1, -1 bnez a1, 1b ret The core of this is a single decode-bundle that always loops and contains 4 instruction in its core. The CPU may push 150/4 = 30+ bundles, 30 times around the loop, before we can start updating the BTC - this is particularly a problem with global history predictors which to be useful really to be updated on every prediction. A better solution Let’s look at how our BTC works: The PC and the global history (a bit vector) are hashed (just some xors and bit swapping) into indexes into the 3 BTC tables, they’re used to look up the 3 tables. The combined output is used to choose whether the bimodal or global history predictor is best for a particular bundle. Our solution to the above problems is to create a ‘pending prediction’ queue in front of the normal BTC tables. Each entry contains the information about a bundle prediction. Including the PC used for it and the global history at the point that it was created. Newer predictions are performed by looking into the queue from most recent to oldest for each of the 3 hashes (individually and independently) comparing them with the hashes of the PC and global history generated in each entry, if no match is found then the value from the main tables is used. The per-bundle BTC pending prediction queue acts similarly to the main per-instruction commitQ - in this case each instruction in the commitQ carries a reference to the decode-bundle it came from. Actions If a branch instruction in the commitQ is discovered to be mispredicted all the instructions following it are discarded. At the same time entries in the BTC prediction queue that are newer than the bundle corresponding to the mispredicted instruction are also discarded, and the prediction queue entry that does correspond to the mispredicted branch has its data updated. Finally that prediction queue’s copy of the global history along with the new branch information is used to reload the global history vector used for the next BTC prediction. Finally each BTC pending queue entry has a ‘committed’ bit - it gets set when all the instructions in the corresponding bundle hit the commit state in the commitQ, that means none of them will be mispredicted, or already have been. On every clock if the oldest entry in the BTC pending queue has its committed bit set then its data is copied back into the main BTC tables. To Recap The important ideas here: we maintain a queue of pending uncommitted BTC predictions each entry overrides the ones after it and the main tables the queue is flushed and the top entry updated on a misprediction committed data is pushed into the main tables Next time: BTC (Part 3) Predicting Subroutine Returns]]></summary></entry></feed>
+<p>Next time: How our main pipe works - an overview</p>]]></content><author><name>Paul Campbell</name></author><summary type="html"><![CDATA[This is the third of an occasional series of articles on the VRoom!/RVoom RISC-V CPU. This week a shorter update, we’re going to talk about how we can create speculative entries in the Branch Target Cache (BTC) call-return stack. A quick reminder of some of what we learned in the previous blog. we decode large bundles of many instructions every clock we predict bundles not instructions we maintain a queue of pending uncommitted BTC predictions each entry overrides the ones after it and the main tables Introduction Last time we talked about how we manage speculated branch target cache (BTC) entries, in short we have a queue of speculated BTC updates in front of the normal BTC tables, those entries are discarded or updated when a speculated branch is found to have been mispredicted, and retired into the main tables when a corresponding branch (or rather bundle of instructions) is committed. Subroutine call stack In addition to the standard BTC tables we also have a per-access mode call-return stack, RISC-V defines for us the instructions that should be used to infer these (and which not to), in the BTC we provide a 32-entry stack (smaller for M-mode) of the last 32 subroutine calls so we can predict the return address when decoding ret instructions (if we get it wrong it’s not the end of the world, it will be corrected when the ret instruction hits the branch ALU) Initially we thought we’d just tag branches with a pointer to the top-of stack, and wind it back when we got a misprediction, then we found out a case which turned out to have a particularly heavy impact on performance: ..... call a r1: call b r2 .... a: bnez a0, 1f &lt; branch mispredicted ret 1: .... b: .... essentially what happens here is that we speculatively fetch the following instruction stream: Instruction call stack =========== ========== call a r1 - bnez a0, 1f r1 - &lt; remembers TOS ret - &lt; everything from here on is call b r2 - mispredicted .... Sometime later the bnez is resolved in the branch ALU and discovered to have been mispredicted. But by that point the return address ‘r1’ on the call stack has been popped and replaced with ‘r2’, even though we got the top of stack (TOS) correct, its contents are wrong, and can’t be undone when we discover the misprediction. This means that at some later time when we finally do return from subroutine ‘a’ the prediction will be to ‘r2’ rather than ‘r1’ - this in turn will result in another misprediction when that return instruction hits the branch ALU, which is exactly what were were trying to avoid. Solution Our solution is to take a similar approach to the one we took for the BTC tables and put a queue of prediction history in front of the call/return stack, in this case it’s a queue of push and pop actions. Instead of being indexed by hashes of the PC/global history, it’s simply the TOS address that’s used instead. Top of stack always returns the latest push that matches the current TOS (and the top of the actual backing stack otherwise). Like BTC speculative queue mentioned in the previous blog entry this queue is managed by the same bundle tag we attach to instructions in the commitQ - when a mispredicted branch instruction is discovered then the return stack speculative queue is truncated removing entries that correspond to the discarded instruction bundles and the TOS updated to the oldest retained entry. Similarly when the last instruction in an instruction bundle is committed then related call-return stack speculative queue entries are tagged ‘committed’, and then written back in order into the call-return stack. To Recap The important ideas here: we have call-return stacks to predict the address of return instructions we maintain a queue of speculative push/pop transitions each entry overrides the ones after it and the main tables the queue is flushed on a misprediction committed data is pushed into the main tables Next time: How our main pipe works - an overview]]></summary></entry></feed>

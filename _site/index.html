@@ -100,6 +100,76 @@
   
   <div class="post">
     <h1 class="post-title">
+      <a href="/2022/07/14/trace-part2/">
+        VRoom! blog&#58; Trace cache - Part 2
+      </a>
+    </h1>
+
+    <span class="post-date">14 Jul 2022</span>
+
+    <h3 id="introduction">Introduction</h3>
+
+<p>It’s been a couple of months since I last posted about our work on a trace cache for VRroom, it’s
+become a bit of slog - trace cache bugs are the worst: suddenly out of nowhere your code branches off
+into the weeds, often caused by something that happened tens of thousands of clocks before. Short 
+story, we’re pausing work on my trace cache implementation to get more important stuff done, long story: well read on</p>
+
+<h3 id="what-is-good-about-our-current-trace-cache">What is good about our current Trace Cache?</h3>
+
+<p>You’ll remember from the previous blog post about our trace cache that it’s pretty simple, the idea
+was to bolt on a direct mapped cache filled with traces extracted from the completion end of our commit engine
+that competed with the normal icache/branch-predictor/PC/decoder to provide decoded data directly to the 
+rename units.</p>
+
+<p>After the last blog post we integrated support to avoid traces from crossing instruction call/return 
+transitions, this preserved the call prediction stacks in the BTC and made overall performance 
+in the same ballpark as the existing performance.</p>
+
+<p>Now that is up and working, it passes all our sanity tests, direct examination of the pipelines shows a higher
+issue rate (8 instructions per clock regularly which was the goal) but with a higher stall rate (because the ALUs are busy and the commit queue is filling) - which indicates that a well working trace cache probably
+needs an increase in the number of ALUs and/or load/store units to further increase performance - that in
+itself is not a bad thing it means we have more performance choices when choosing a final architecture.</p>
+
+<h3 id="what-is-bad-about-our-current-trace-cache">What is bad about our current Trace Cache?</h3>
+
+<p>However while the back end pipelines are performing better the one bad thing that benchmarks show is that because
+our naive direct mapped trace cache bypasses the branch predictor and as a result it performs worse (about 15% worse) on
+branch prediction - you will recall we’re using a traditional dual combined branch predictor (bimodal and global history) - the trace
+cache is effectively embedding the bimodal BTC data in the cache, but not the global predictor data.</p>
+
+<p>What we really need is a way to incorporate the global predictor into the trace cache tags, that way we
+can collect multiple traces for the same starting PC address (there are lots of examples of this in the
+literature on trace caches, it’s not a new idea).</p>
+
+<p>This is not a trivial change, it means pulling apart the BTC and PC fetcher code and more closely 
+integrating the trace cache at a lower level - the BTC needs to be able to track both trace streams and icache streams to update its predictors from both sources - the current BTC/PC fetcher are very focused 
+on icache boundaries and predicting multiple branches within them, the data coming out of the trace cache
+tends to have arbitrary PC boundaries, and has unconditional branches elided - merging them more
+than we currently have is a non trivial piece of work.</p>
+
+<p>Note that getting a direct mapped trace cache to ~5/6 the performance of the existing CPU is actually not
+that bad - it means we’re on the right track, just not there yet.</p>
+
+<h3 id="conclusion">Conclusion</h3>
+
+<p>Our basic trace cache design seems to be functional, but doesn’t perform well enough yet - short to medium
+term it’s become a bit derail against making other progress so we’re going to set it aside for the moment,
+probably until
+the next time the BTC has been opened up and is spread over the desktop for some major rearrangement and
+then dig into integrating global history into the trace cache tags and BTC predictor updates from trace data.</p>
+
+<p>This is not the last we’ve seen of the trace cache.</p>
+
+<p>Our next work - some simple work on optimising moves and 0ing of registers - some minor instruction recognition
+in the renamer will allow commit Q entries to resolve earlier (more in parallel) reducing instruction
+dependencies on the fly.</p>
+
+<p>Next time: Simple Renamer Optimisations</p>
+
+  </div>
+  
+  <div class="post">
+    <h1 class="post-title">
       <a href="/2022/04/30/trace-part1/">
         VRoom! blog&#58; Trace cache - Part 1
       </a>
@@ -800,82 +870,6 @@ started investigating getting a build into OpenLane/Skyworks - again not with th
 taping something out (it’ probably too big for any of the open source runs) but more as a reality check.</p>
 
 <p>Next time: Verilog changes</p>
-
-  </div>
-  
-  <div class="post">
-    <h1 class="post-title">
-      <a href="/2022/01/16/virtual-memory/">
-        VRoom! blog&#58; Virtual Memory
-      </a>
-    </h1>
-
-    <span class="post-date">16 Jan 2022</span>
-
-    <h3 id="introduction">Introduction</h3>
-
-<p>Booting Linux isn’t going to work without some form of virtual memory, RISC-V has
-a well defined spec for VM, implementation isn’t hard - page tables are well defined,
-there’s nothing particularly unusual or surprising there</p>
-
-<h3 id="l1-tlbs">L1 TLBs</h3>
-
-<p>We have separate Instruction and Data level one TLBs, they’re fully associative which means that
-we’re not practically limited to power of two sizes (though currently they have 32 entries each),
-each entry contains a mapping between an ASID and upper bits of a virtual address and a physical
-address - we support the various sizes of pages (both in tags and data).</p>
-
-<p>A fully associative TLB with random replacement makes it harder for Meltdown/Spectre sorts of
-attacks to use TLB replacement to attack systems. On VROOM memory accesses that miss in the TLB never result in
-data cache changes.</p>
-
-<p>Since the ALUs, and in particular the memory and fetch units, are shared between HARTs (CPUs) in the same
-simultaneous multi-threaded core then so are the TLBs shared.  We need a way to distinguish mappings between HARTs - this implementation
-is simple, we reserve a portion of the ASID which is forced to a unique value for each core - each HART thinks it has N bits of ASID, in reality there are N+1. There’s also
-a system flag that we can optionally set that lets SMT HARTs share the full sized ASID (provided the software understands
-that ASIDs are system rather than CPU global).</p>
-
-<p>Currently we use the old trick of doing L1 TLB lookup with the upper bits of a virtual address while using
-the lower bits in parallel to do the indexing of the L1 data/instruction caches - large modern cache line sizes 
-mean that you have to go many ways/sets to get large data and instruction caches - this also helps
-with Meltdown/Spectre/etc mitigation.</p>
-
-<p>I’m currently redesigning the whole memory datapath unit to split TLB lookup and data cache access
-into separate cycles - mostly to expose more parallelism during scheduling - more about that in
-a later posting once it’s all working.</p>
-
-<h3 id="l2-tlbs">L2 TLBs</h3>
-
-<p>TLB misses result in stalled instructions in the commitQ - there’s a small queue of pending TLB 
-lookups in the memory unit and 2 pending lookups in the fetch unit - they feed the table walker
-state machine which starts by dipping into the L2 TLB cache - currently it’s a 4-way 256 entry (so
-1k entries total) set associative cache shared between the instruction and data TLBs - TLB data found here is fed directly to the L1 TLBs (a satisfied L1 miss takes 4
-clocks).</p>
-
-<h3 id="table-walking">Table walking</h3>
-
-<p>If a request also misses in the L2 TLB cache the table walker state machine starts walking page table trees.</p>
-
-<p>Full
-cache lines of TLB data are fetched into a local read-only cache which contains a small number of entries,
-essentially enough for 1 line for each level in the page hierarchy, and 2 for the lowest level, repeated 
-for instruction TLB and the data TLB (then repeated again for multiple HARTs).</p>
-
-<p>After initial filling most table walks hit in this cache. This cache is slightly integrated into the data L1 I-cache, they share a 
-read-only access port into the cache coherency fabric, and both can be invalidated by data cache snoops shootdowns.</p>
-
-<h3 id="tlb-invalidation">TLB Invalidation</h3>
-
-<p>TLB invalidation is triggered by executing a TLB flush instruction - these instructions let the instructions
-before them in the commitQ execute before they themselves are executed.</p>
-
-<p>At this point they trigger a
-commitQ flush (tossing any speculative instructions executed with the old VM mappings). At the same time
-they trigger L1 and L2 TLB flushes. Note: there is no need to invalidate the TLB walker’s small data cache
-as it will have been invalidated (shot down) by the cache coherency protocols if any page tables were
-changed in the process.</p>
-
-<p>Next time: (Once I get it working) Data memory accesses</p>
 
   </div>
   
