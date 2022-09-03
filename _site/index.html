@@ -100,6 +100,165 @@
   
   <div class="post">
     <h1 class="post-title">
+      <a href="/2022/08/31/fp-1/">
+        VRoom! blog&#58; Floating Point 1
+      </a>
+    </h1>
+
+    <span class="post-date">31 Aug 2022</span>
+
+    <h3 id="introduction">Introduction</h3>
+
+<p>We started work on FP quite a while ago - building an FP adder and multiplier, that part of the design 
+had previously passed a few million test vectors but has been sitting on the shelf. What we’re working on now is integrating these blocks along 
+with the missing instructions into a schedulable FP unit, N of which can then be added to a VRoom! - we’re not done yet so this
+blog post is a write up about how some of this new stuff works - mostly it’s about the register
+file and instruction scheduling.</p>
+
+<h3 id="alus">ALUs</h3>
+
+<p>We have not spent lot of time building fast (at the gate level) ALUs for VRoom!, at least not yet - we fully
+expect a serious implementation will have carefully hand built register files, adders, data paths, multipliers, barrel shifters, FPUs, TLBs, caches etc</p>
+
+<p>Instead we’ve made realistic estimates of the number of clocks we think each unit should take to run
+in a high speed implementation and have
+built versions that are bit accurate at the ALU block level, but have left the details of their cores to
+future implementors (along with this code as working DV targets).</p>
+
+<p>In our AWS test system that boots linux we’ve
+just let vivado do its thing with these models and relaxed the timing targets (with the exception
+of the caches and register files
+where we were limited by the SRAM models available and had to do a little bit of special work).</p>
+
+<p>So this FPU implementation will have all the details required to implement the RISC-V FP 32 and 64-bit
+instruction sets - but low level timing work needs an actual timing and process goal to really
+start work. So expect verilog ‘*’ and ‘+’ but not wallace trees and adders.</p>
+
+<p>Thinking forwards to physical layout is important when we start to talk about the physical layout of things like ALUs and register files - read onward ….</p>
+
+<h3 id="registers">Registers</h3>
+
+<p>A quick reminder our integer register file is split into 2 parts:</p>
+<ul>
+  <li>‘architectural’ registers - the ones that a programmer can see integer registers 1-31, and</li>
+  <li>‘commit’ registers - these registers are the results of completed operations that have not yet been architecturally committed</li>
+</ul>
+
+<p><img src="/public/images/regs1.svg" alt="placeholder" title="Registers" /></p>
+
+<p>Commit registers have 3 states:</p>
+<ul>
+  <li>not yet done</li>
+  <li>completed</li>
+  <li>committed</li>
+</ul>
+
+<p>Instructions that use a “not yet done” registers as a source register cannot be scheduled to an ALU.
+Instructions who’s operands are “completed” or “committed” can be scheduled - “completed” operands are found 
+in the commit register file, “committed” ones in the architectural register file. The output from each
+instruction initially goes into the commit register file (ALU write ports only go there), when an
+instruction is committed (ie it can’t be undone by an interrupt, trap or a mispredicted branch) it
+is copied into the architectural register file (and the corresponding commitQ entry can be reused).</p>
+
+<p>A note on write ports: by construction no two ALUs write to the same address in the commit registers during the
+same clock. Equally by filtering no two architectural register file write ports are ever written with
+the same address in the same clock.</p>
+
+<p>It’s possible to generate a commit transfer that attempts multiple
+writes to the same location, but the commit logic disables the least recent one(s). Initially we got this
+logic backwards - it took a surprisingly long time before we found a real-world case where that broke
+something.</p>
+
+<p>So how do we implement FP registers in this world? there are lots of possible solutions, let’s talk about
+two of them.</p>
+
+<p>Firstly we should realize that:</p>
+<ul>
+  <li>commit registers are just bits, they have no idea whether they are FP or integer, or of any particular size (single, double, i64, i32 etc)</li>
+  <li>they are the uncommitted outputs of ALUs</li>
+  <li>the will be written back into an architectural register file - the commitQ entry attached to them knows where they need to go</li>
+</ul>
+
+<p>The output of most instructions will end up going into the integer register file, the outputs of some FP
+instructions also end up in the integer register file. The output of most FP instructions end up in the
+FP register files, as do the results of FP load instructions.</p>
+
+<p>One possible architecture, and the one we’ve chosen to implement for the moment looks like this:</p>
+
+<p><img src="/public/images/regs2.svg" alt="placeholder" title="FPU Registers" /></p>
+
+<p>You’ll notice that the FPU and Integer sides share a single commit register file - this works well
+for units that might otherwise need both FP and integer write ports (loads and the FPU) it has
+the downside that
+the number of read and write ports in the commit registers continue to grow.</p>
+
+<p>An alternative design, if we’re being careful about layout and don’t mind spending gates to reduce routing congestion, could
+split the commit registers into FP and integer register files, each with fewer read and write ports (but
+at any one time half of the entries not being used) then we could have something like this:</p>
+
+<p><img src="/public/images/regs3.svg" alt="placeholder" title="Combined FPU Registers" /></p>
+
+<p>You have to think of this diagram as being vaguely a hint as to layout (FPUs on one side, integer ALUs on the other registers in the middle).</p>
+
+<p>The load/store unit will still need paths to the FPU registers and the FPUs to the integer ones, but
+in general routing complexity is reduced and the max number of ports per individual register file is lower.</p>
+
+<p>Switching from the current design to this one would be relatively trivial - less than the time one might
+spend switching to a hand built register file anyway. This is another architectural choice that really 
+needs to be left to those who are actually laying out a real chip, and different people might make different choices.</p>
+
+<h3 id="scheduling-fp-instructions">Scheduling FP Instructions</h3>
+
+<p>First of all we don’t treat FP load/store instructions as being part of the FPU units - they are done
+as part of the load/store unit - mostly they are treated as all other load/stores are (however single loads
+are nan-boxed rather than sign extended). So we’re not addressing them here.</p>
+
+<p>In our current design most FP instructions run in 1 clock, with some important exceptions</p>
+
+<ul>
+  <li>add - 2 clocks</li>
+  <li>mul, muladd - 3 clocks</li>
+  <li>div/sqrt - N clocks</li>
+</ul>
+
+<p>For any one FPU we can issue one instruction per clock - whichever instruction is scheduled gets to
+use the operand read ports in the next clock - if we ignore div/sqrt for the moment we also need to
+schedule the write port when the instruction completes.</p>
+
+<p>Unlike the other ALUs the FPU scheduler needs to
+keep track of which instructions are active and how long they will take - this isn’t hard it’s just a
+3-bit vector per FPU saying when the FPU will complete previously scheduled instructions (the LSB of the vector is
+actually ignored because nothing it can schedule will finish in the next clock - remember the scheduler is always running a clock ahead of the ALUs).</p>
+
+<p>Just like the other ALUs all the commit stations doing FPU ops make a bid for an FPU when the
+know their operands
+will be ready in the next clock, unlike normal ALUs they also specify how many clocks their 
+instruction will take - that request is masked with each current FPU state before being presented to
+the scheduler - a request that can’t run on FPU 0 because of write port contention might be 
+bumped to FPU 1.</p>
+
+<p>We haven’t implemented div/sqrt yet - they’re essentially going to have two requests, one for starting
+(operand port contention) and one for write back (write port contention), unlike all the other functions an FPU can only 
+perform one div/sqrt at a time, everything else is fully pipelined (we can issue an add or mul on every clock). We’ll talk
+more about div/sqrt in the next blog post when they’re actually implemented.</p>
+
+<h3 id="still-to-do">Still To Do</h3>
+
+<p>We know how handle exceptions, the way RISC-V manages them works very well with our commit model,
+but there’s still a bunch of work to do there.</p>
+
+<p>We also have a small number of instructions still to implement - basically divide, sqrt and the
+multiple-add instructions.</p>
+
+<p>Finally we’re using our own testing for the moment, once we’re done with the above we’ll pull in 
+the more public verification tests and run them before we declare we’re finished.</p>
+
+<p>Next time: more FPU stuff</p>
+
+  </div>
+  
+  <div class="post">
+    <h1 class="post-title">
       <a href="/2022/08/05/rename-opts/">
         VRoom! blog&#58; Rename Optimizations
       </a>
@@ -632,128 +791,6 @@ not perfect but allow us higher core clock speeds - time will tell. Sadly Yosys 
 keep them.</p>
 
 <p>Next time: Probably something about trace caches, might take a while</p>
-
-  </div>
-  
-  <div class="post">
-    <h1 class="post-title">
-      <a href="/2022/03/12/new-verilog/">
-        VRoom! blog&#58; Verilog changes, new performance numbers
-      </a>
-    </h1>
-
-    <span class="post-date">12 Mar 2022</span>
-
-    <h3 id="introduction">Introduction</h3>
-
-<p>Not really an architectural posting, more about tooling, skip if it’s not really your thing, also new
-some performance numbers.</p>
-
-<h3 id="new-performance-numbers">New Performance Numbers</h3>
-
-<p>I found the bug in the BTC - mispredicted 4-byte branches that crossed a 16 byte boundary (our
-instruction bundle size) this is now fixed and we have better dhrystone numbers: 6.33 DMIPS/MHz
-at an IPC of 2.51 - better than I expected! We can still do better.</p>
-
-<h3 id="more-system-verilog-interfaces-for-the-mostly-win">More System Verilog, Interfaces for the (mostly) win</h3>
-
-<p>Last week I posted a description about my recent major changes to the way that the load/store
-unit works, what I didn’t touch on is some pretty major changes to the ways the actual Verilog code 
-is written.</p>
-
-<p>I’m an old-time verilog hack, I’ve even written a compiler (actually 2 of them, you can
-thank me for the * in the “always @(*)” construct). Back in the
-90s, I tried to build a cloud biz (before ‘cloud’ was a word) selling time with it for that last
-couple of months when you need zillions of licenses and machines to run them on. Sadly we were
-probably ahead of our time, and we got killed by Enron the “smartest guys in the room” who made 
-any Californian business that depended on the price of electricity impossible to budget for. I
-opened sourced the compiler and it died a quiet death.</p>
-
-<p>I started this project using Icarus Verilog, using a relatively simple System Verilog subset,
-making sure I could also build on Verilator once I started running larger sims.</p>
-
-<p>I’m a big fan of Xs, verilog’s 4-value ‘undefined’ values - in particular using them as clues to
-synthesis about when we don’t care and using them during simulation to propagate errors when
-assumptions are not met (and to check that we really don’t care)</p>
-
-<p>For example - a 1-hot Mux:</p>
-
-<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*)
-casez (control) // synthesis full_case parallel_case
-4'b1000: out = in0;
-4'b0100: out = in1;
-4'b0010: out = in2;
-4'b0001: out = in3;
-default: out = 'bx;
-endcase
-</code></pre></div></div>
-
-<p>One could just use:</p>
-
-<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>always @(*) 
-casez (control) // synthesis full_case parallel_case
-4'b1???: out = in0;
-4'b?1??: out = in1;
-4'b??1?: out = in2;
-4'b???1: out = in3;
-endcase
-</code></pre></div></div>
-
-<p>Chances are synthesis will make the same gates - but in the first case simulation is more likely to blow up
-(and here I mean blow up ‘constructively’ - signalling an error) if more than 1 bit of
-control is set. “full_case parallel_case” is a potentially dangerous thing, it gives the synthesis tool
-permission to do something that might not be the same as what the verilog compiler does during simulation
-(if the assumption here that control is one-hot isn’t met) the “out = ‘bx” gets us a warning as the Xs 
-propagate if our design is broken.</p>
-
-<p>Xs are also good for figuring out what really needs to be reset, propagating timing failures etc etc</p>
-
-<p>Sadly Verilator doesn’t support Xs, while Icarus Verilog does. Icarus Verilog also compiles
-a lot faster making for far faster turn around for small tests - I had got to a point where I would
-use Verilator for long tests and Icarus for actual debugging once I could reproduce a problem “in the
-small”.</p>
-
-<p>One of the problems I’ve had with this project is that in simple verilog there really wasn’t a
-way to pass an arbitrary
-number of an interface to an object - for example the dcache needs L dcache read ports, where L is the
-number of load ports - you can pass bit vectors of 1-bit structures, but not an array of n-bit structures
-like addresses, or an array of data results.</p>
-
-<p>System Verilog provides a mechanism to do this via “interfaces” - and this time around I have embraced them
-with a passion - here’s NLOAD async dcache lookups:</p>
-
-<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>interface DCACHE_LOAD #(int  RV=64, NPHYS=56, NLOAD=2);     
-	typedef struct packed {
-		bit [NPHYS-1:$clog2(RV/8)]addr; // CPU read port
-	} DCACHE_REQ;
-	typedef struct packed {
-		bit hit;
-		bit hit_need_o;                                     
-		bit [RV-1:0]data;
-	} DCACHE_ACK;
-	DCACHE_REQ req[0:NLOAD-1];
-	DCACHE_ACK ack[0:NLOAD-1];
-endinterface
-</code></pre></div></div>
-
-<p>Sadly Icarus Verilog (currently) doesn’t support interfaces and I’ve had to remove them from our
-supported tools - there’s still stuff in the Makefile for its support (I live in hope :-). Even Verilator’s
-support is relatively minimal, it doesn’t support arrays within arrays, nor does it support
-unpacked structures (so debug in gtkwave is primitive).</p>
-
-<p>I’m really going to miss 4-value simulation, I hope IV supports interfaces sometime - I wish
-I had the time to just do it and offer it up, but realisticly one can really only do one Big Thing at a time.</p>
-
-<p>What this does mean though is that longer term a lot of those places where I’m currently making
-on-the-fly verilog from small C programs to get around the inability to pass arbitrary numbers
-of a thing to a module (the register file comes to mind), or using ifdef’s to enable
-particular interfaces will likely go away in the future to be replaced by interfaces. They won’t completely
-go away, I still need them to make things like arbitrary width 1-hot muxes - and more generally
-for large repetitive things that could be ruined by fat finger typos.</p>
-
-<p>You can find the new load/store interfaces in “lstypes.si”.</p>
-
-<p>Next time: Combining ALUs and Branch units</p>
 
   </div>
   

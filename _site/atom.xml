@@ -4,13 +4,168 @@
  <title>VRoom!</title>
  <link href="http://localhost:4000/atom.xml" rel="self"/>
  <link href="http://localhost:4000/"/>
- <updated>2022-08-06T17:45:45+12:00</updated>
+ <updated>2022-09-03T17:37:43+12:00</updated>
  <id>http://localhost:4000</id>
  <author>
    <name>Paul Campbell</name>
    <email></email>
  </author>
 
+ 
+ <entry>
+   <title>VRoom! blog&#58; Floating Point 1</title>
+   <link href="http://localhost:4000/2022/08/31/fp-1/"/>
+   <updated>2022-08-31T00:00:00+12:00</updated>
+   <id>http://localhost:4000/2022/08/31/fp-1</id>
+   <content type="html">&lt;h3 id=&quot;introduction&quot;&gt;Introduction&lt;/h3&gt;
+
+&lt;p&gt;We started work on FP quite a while ago - building an FP adder and multiplier, that part of the design 
+had previously passed a few million test vectors but has been sitting on the shelf. What we’re working on now is integrating these blocks along 
+with the missing instructions into a schedulable FP unit, N of which can then be added to a VRoom! - we’re not done yet so this
+blog post is a write up about how some of this new stuff works - mostly it’s about the register
+file and instruction scheduling.&lt;/p&gt;
+
+&lt;h3 id=&quot;alus&quot;&gt;ALUs&lt;/h3&gt;
+
+&lt;p&gt;We have not spent lot of time building fast (at the gate level) ALUs for VRoom!, at least not yet - we fully
+expect a serious implementation will have carefully hand built register files, adders, data paths, multipliers, barrel shifters, FPUs, TLBs, caches etc&lt;/p&gt;
+
+&lt;p&gt;Instead we’ve made realistic estimates of the number of clocks we think each unit should take to run
+in a high speed implementation and have
+built versions that are bit accurate at the ALU block level, but have left the details of their cores to
+future implementors (along with this code as working DV targets).&lt;/p&gt;
+
+&lt;p&gt;In our AWS test system that boots linux we’ve
+just let vivado do its thing with these models and relaxed the timing targets (with the exception
+of the caches and register files
+where we were limited by the SRAM models available and had to do a little bit of special work).&lt;/p&gt;
+
+&lt;p&gt;So this FPU implementation will have all the details required to implement the RISC-V FP 32 and 64-bit
+instruction sets - but low level timing work needs an actual timing and process goal to really
+start work. So expect verilog ‘*’ and ‘+’ but not wallace trees and adders.&lt;/p&gt;
+
+&lt;p&gt;Thinking forwards to physical layout is important when we start to talk about the physical layout of things like ALUs and register files - read onward ….&lt;/p&gt;
+
+&lt;h3 id=&quot;registers&quot;&gt;Registers&lt;/h3&gt;
+
+&lt;p&gt;A quick reminder our integer register file is split into 2 parts:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;‘architectural’ registers - the ones that a programmer can see integer registers 1-31, and&lt;/li&gt;
+  &lt;li&gt;‘commit’ registers - these registers are the results of completed operations that have not yet been architecturally committed&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/regs1.svg&quot; alt=&quot;placeholder&quot; title=&quot;Registers&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Commit registers have 3 states:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;not yet done&lt;/li&gt;
+  &lt;li&gt;completed&lt;/li&gt;
+  &lt;li&gt;committed&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Instructions that use a “not yet done” registers as a source register cannot be scheduled to an ALU.
+Instructions who’s operands are “completed” or “committed” can be scheduled - “completed” operands are found 
+in the commit register file, “committed” ones in the architectural register file. The output from each
+instruction initially goes into the commit register file (ALU write ports only go there), when an
+instruction is committed (ie it can’t be undone by an interrupt, trap or a mispredicted branch) it
+is copied into the architectural register file (and the corresponding commitQ entry can be reused).&lt;/p&gt;
+
+&lt;p&gt;A note on write ports: by construction no two ALUs write to the same address in the commit registers during the
+same clock. Equally by filtering no two architectural register file write ports are ever written with
+the same address in the same clock.&lt;/p&gt;
+
+&lt;p&gt;It’s possible to generate a commit transfer that attempts multiple
+writes to the same location, but the commit logic disables the least recent one(s). Initially we got this
+logic backwards - it took a surprisingly long time before we found a real-world case where that broke
+something.&lt;/p&gt;
+
+&lt;p&gt;So how do we implement FP registers in this world? there are lots of possible solutions, let’s talk about
+two of them.&lt;/p&gt;
+
+&lt;p&gt;Firstly we should realize that:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;commit registers are just bits, they have no idea whether they are FP or integer, or of any particular size (single, double, i64, i32 etc)&lt;/li&gt;
+  &lt;li&gt;they are the uncommitted outputs of ALUs&lt;/li&gt;
+  &lt;li&gt;the will be written back into an architectural register file - the commitQ entry attached to them knows where they need to go&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The output of most instructions will end up going into the integer register file, the outputs of some FP
+instructions also end up in the integer register file. The output of most FP instructions end up in the
+FP register files, as do the results of FP load instructions.&lt;/p&gt;
+
+&lt;p&gt;One possible architecture, and the one we’ve chosen to implement for the moment looks like this:&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/regs2.svg&quot; alt=&quot;placeholder&quot; title=&quot;FPU Registers&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;You’ll notice that the FPU and Integer sides share a single commit register file - this works well
+for units that might otherwise need both FP and integer write ports (loads and the FPU) it has
+the downside that
+the number of read and write ports in the commit registers continue to grow.&lt;/p&gt;
+
+&lt;p&gt;An alternative design, if we’re being careful about layout and don’t mind spending gates to reduce routing congestion, could
+split the commit registers into FP and integer register files, each with fewer read and write ports (but
+at any one time half of the entries not being used) then we could have something like this:&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/public/images/regs3.svg&quot; alt=&quot;placeholder&quot; title=&quot;Combined FPU Registers&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;You have to think of this diagram as being vaguely a hint as to layout (FPUs on one side, integer ALUs on the other registers in the middle).&lt;/p&gt;
+
+&lt;p&gt;The load/store unit will still need paths to the FPU registers and the FPUs to the integer ones, but
+in general routing complexity is reduced and the max number of ports per individual register file is lower.&lt;/p&gt;
+
+&lt;p&gt;Switching from the current design to this one would be relatively trivial - less than the time one might
+spend switching to a hand built register file anyway. This is another architectural choice that really 
+needs to be left to those who are actually laying out a real chip, and different people might make different choices.&lt;/p&gt;
+
+&lt;h3 id=&quot;scheduling-fp-instructions&quot;&gt;Scheduling FP Instructions&lt;/h3&gt;
+
+&lt;p&gt;First of all we don’t treat FP load/store instructions as being part of the FPU units - they are done
+as part of the load/store unit - mostly they are treated as all other load/stores are (however single loads
+are nan-boxed rather than sign extended). So we’re not addressing them here.&lt;/p&gt;
+
+&lt;p&gt;In our current design most FP instructions run in 1 clock, with some important exceptions&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;add - 2 clocks&lt;/li&gt;
+  &lt;li&gt;mul, muladd - 3 clocks&lt;/li&gt;
+  &lt;li&gt;div/sqrt - N clocks&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;For any one FPU we can issue one instruction per clock - whichever instruction is scheduled gets to
+use the operand read ports in the next clock - if we ignore div/sqrt for the moment we also need to
+schedule the write port when the instruction completes.&lt;/p&gt;
+
+&lt;p&gt;Unlike the other ALUs the FPU scheduler needs to
+keep track of which instructions are active and how long they will take - this isn’t hard it’s just a
+3-bit vector per FPU saying when the FPU will complete previously scheduled instructions (the LSB of the vector is
+actually ignored because nothing it can schedule will finish in the next clock - remember the scheduler is always running a clock ahead of the ALUs).&lt;/p&gt;
+
+&lt;p&gt;Just like the other ALUs all the commit stations doing FPU ops make a bid for an FPU when the
+know their operands
+will be ready in the next clock, unlike normal ALUs they also specify how many clocks their 
+instruction will take - that request is masked with each current FPU state before being presented to
+the scheduler - a request that can’t run on FPU 0 because of write port contention might be 
+bumped to FPU 1.&lt;/p&gt;
+
+&lt;p&gt;We haven’t implemented div/sqrt yet - they’re essentially going to have two requests, one for starting
+(operand port contention) and one for write back (write port contention), unlike all the other functions an FPU can only 
+perform one div/sqrt at a time, everything else is fully pipelined (we can issue an add or mul on every clock). We’ll talk
+more about div/sqrt in the next blog post when they’re actually implemented.&lt;/p&gt;
+
+&lt;h3 id=&quot;still-to-do&quot;&gt;Still To Do&lt;/h3&gt;
+
+&lt;p&gt;We know how handle exceptions, the way RISC-V manages them works very well with our commit model,
+but there’s still a bunch of work to do there.&lt;/p&gt;
+
+&lt;p&gt;We also have a small number of instructions still to implement - basically divide, sqrt and the
+multiple-add instructions.&lt;/p&gt;
+
+&lt;p&gt;Finally we’re using our own testing for the moment, once we’re done with the above we’ll pull in 
+the more public verification tests and run them before we declare we’re finished.&lt;/p&gt;
+
+&lt;p&gt;Next time: more FPU stuff&lt;/p&gt;
+</content>
+ </entry>
  
  <entry>
    <title>VRoom! blog&#58; Rename Optimizations</title>
