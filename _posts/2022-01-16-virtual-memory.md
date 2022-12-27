@@ -1,6 +1,6 @@
 ---
 layout: post
-title: VRoom! blog&#58; Virtual Memory
+title: VRoom! blog - Virtual Memory
 ---
 
 ### Introduction

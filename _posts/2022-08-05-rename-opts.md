@@ -1,6 +1,6 @@
 ---
 layout: post
-title: VRoom! blog&#58; Rename Optimizations
+title: VRoom! blog - Rename Optimizations
 ---
 
 ### Introduction

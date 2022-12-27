@@ -1,6 +1,6 @@
 ---
 layout: post
-title: Vroom! blog&#58; Core VRoom! Architecture
+title: Vroom! blog - Core VRoom! Architecture
 ---
 
 

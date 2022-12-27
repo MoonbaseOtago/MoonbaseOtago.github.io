@@ -1,6 +1,6 @@
 ---
 layout: post
-title: VRoom! blog&#58; Verilog changes, new performance numbers
+title: VRoom! blog - Verilog changes, new performance numbers
 ---
 
 ### Introduction

@@ -1,6 +1,6 @@
 ---
 layout: post
-title: Blog&#58; Introducing Vroom!
+title: Blog - Introducing Vroom!
 ---
 ![placeholder](/talk/assets/chip.png "Branch Target Cache example")
 

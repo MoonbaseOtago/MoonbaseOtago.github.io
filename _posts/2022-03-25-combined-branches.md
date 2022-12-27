@@ -1,6 +1,6 @@
 ---
 layout: post
-title: VRoom! blog&#58; Combining ALUs and Branch Units
+title: VRoom! blog - Combining ALUs and Branch Units
 ---
 
 ### Introduction
