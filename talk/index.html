@@ -22,8 +22,8 @@
 					<p>paul@taniwha.com @moonbaseotago</p>
 					<img width="300" src="assets/moonbase.png"><br>
 					<small>
-						<p>(Minor changes Nov 6 2021, March 20222)
-						<p>(C) Copyright Moonbase Otago 2021-2022</p>
+						<p>(Minor changes Nov 6 2021, March 2022, Feb 2023)
+						<p>(C) Copyright Moonbase Otago 2021-2023</p>
 						<p>All rights reserved</p>
 					</small>
 				</section>
@@ -33,12 +33,12 @@
 					<ul>
 						<li>Goal: Very high end RISC-V implementation – cloud server class</li>
 						<li>Out of order, super scalar, speculative</li>
-						<li>RV64-IMAFDCHB(V)</li>
+						<li>RV64-IMAFDCHBK(V)</li>
 						<li>Up to 8 IPC (instructions per clock) peak, goal ~4 average on ALU heavy work</li>
 						<li>2-way simultaneous multithreading capable</li>
 						<li>Multi-core</li>
 						<li>Currently boots Linux on an AWS-FPGA instance</li>
-						<li>Current dhrystone numbers: ~6.5 DMips/MHz - still a work in progress.</li>
+						<li>Current dhrystone numbers: ~6.75 DMips/MHz - still a work in progress.</li>
 						<li>GPL3 – dual licensing possible</li>
 					</ul>
 					</small>
@@ -183,13 +183,13 @@
 					<h2>ALUs (functional units)</h2>
 					<small>
 					<ul>
-						<li>3 arithmetic (add/sub/and/or/xor/etc) [currently 2]</li>
+						<li>3 arithmetic (add/sub/and/or/xor/etc)</li>
 						<li>1 shift</li>
 						<li>1 multiply/divide</li>
-						<li>&gt;=1 FP	[a work in progress]</li>
-						<li>1 or 2 branch [may be merged into arithmetic units]</li>
+						<li>&gt;=1 FP</li>
+						<li>3 branch [now merged into the arithmetic units]</li>
 						<li>1 CSR/TRAP/privileged </li>
-						<li>1 Load/Store (3 load/2 store per clock) [currently 2/1]</li>
+						<li>1 Load/Store (4 address/4 load/4 store per clock)</li>
 						<li>Each commitQ entry is tagged for one of these</li>
 					</ul>
 					</small>
@@ -247,8 +247,9 @@
 					Note: this area is under active development, check out the blog for more up to date information
 					<ul>
 						<li>Single Unit</li>
-						<li>Can handle 3 concurrent loads and 2 concurrent stores</li>
-						<li>Loads can run in 1 clock if in cache (or snooped from storeQ) and in TLBs</li>
+						<li>Address stage handles 6 V to P TLB lookups in parallel</li>
+						<li>Can handle 4 concurrent loads and 4 concurrent stores</li>
+						<li>Loads can run in 1 clock if in cache (or snooped from storeQ)</li>
 						<li>Also 1 clock speculatively if in storeQ</li>
 						<li>Stores/Fences go in the storeQ, are executed in order, but only once their commitQ instructions are committed, they are abandoned if a speculative store is discarded</li>
 						<li>Loads go in storeQ if they miss in cache, are fenced, or blocked by a pending access to the same cache line</li>
@@ -287,7 +288,7 @@
 						<li>Conditional branches - compares 2 register values, if their relationship is not as predicted, forces a partial commitQ (after the branch instruction) flush and a new PC</li>
 						<li>Subroutine calls – writes PC+2/4 to register as output</li>
 						<li>Indirect branches (if not as predicted forces a partial commitQ flush and a new PC)</li>
-						<li>(may yet merge this into the integer ALU allowing us to resolve multiple branches/clock)</li>
+						<li>Note: This unit has been merged into the integer ALU allowing us to resolve multiple branches/clock.</li>
 					</ul>
 					</small>
 				</section>
@@ -328,11 +329,11 @@
 					<h2>Benchmarks</h2>
 					<div align="left">
 					<small>	
-					<p>Up until now we've been running with the branch target cache broken on purpose so we can debug shootdown operations in the pipeline. Now with linux booting we're starting to run dhrystone in linux user mode on the real hardware, and also in machine mode on the simulator. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
+					<p>Now with linux booting we're starting to run dhrystone in linux user mode on the real hardware, and also in machine mode on the simulator. The xilinx based hardware runs with a much smaller BTC - all numbers are at 25MHz</p>
 					<table>
 					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/MHz</td></tr>
 					<tr><td>Hardware</td><td>142314</td><td>80.9</td><td>3.23</td></tr>
-					<tr><td>Simulator</td><td>285350</td><td>162.4</td><td>6.49</td></tr>
+					<tr><td>Simulator</td><td>296456</td><td>168.7</td><td>6.74</td></tr>
 					</table>
 					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly - the simulator shows that its larger BTC is definitely a plus, it's also now running with the new more parallel load-store units and a combined ALU/branch units - we haven't built an FOGA version yet. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>
 					</small>
@@ -409,7 +410,7 @@
 						<li>1-5GHz (will likely involve adding ~2 pipe stages to the above description)</li>
 						<li>2 HARTs/CPU (ie multithreaded)
 						<li>CommitQ 64 entries - per HART</li>
-						<li>StoreQ 32 entries - shared</li>
+						<li>StoreQ 64 entries - shared</li>
 						<li>I$0 64+ entries of 8 instruction bundles - per HART</li>
 						<li>I$1 64kbtytes - shared</li>
 						<li>D$1 64kbytes - shared</li>
@@ -417,7 +418,7 @@
 						<li>This means ~192 max instructions in flight</li>
 						<li>3 integer ALUs - shared</li>
 						<li>1 shifter - shared</li>
-						<li>3 load 2 store (per clock) load store unit - shared</li>
+						<li>4 load 4 store (per clock) load store unit - shared</li>
 						<li>1 or 2 multipliers - shared</li>
 						<li>1 or 2 FPUs - shared</li>
 						<li>1 vector unit - shared</li>
@@ -453,8 +454,6 @@
 						<li>commitQ size</li>
 						<li>storeQ size</li>
 						<li>Test a multithreaded system</li>
-						<li>Look at merging branch units and ALUs (this allows us to resolve multiple branches/clock)</li>
-						<li>Investigate splitting out TLB lookup from the load/store unit into it’s own ALU – while it adds a clock it potentially allows us to do smart stuff with instruction reordering, it also may help reach Ghz speeds</li>
 					</ul>
 					<p>We’re at a point now though where the size of the AWS FPGA instances may limit what we can test at large scale</p>
 					</small>
@@ -465,14 +464,12 @@
 					<small>
 					<p align="left">Planned work:</p>
 					<ul>
-						<li>Finish FPU – about 50% done</li>
-						<li>Work on BTC (almost finished)</li>
-						<li>Look at merging branch ALUs with arithmetic ALUs</li>
 						<li>I$0 trace cache</li>
 						<li>Expand LS unit to 3/2 from 2/1 load/store</li>
 						<li>Rewrite cache coherency fabric with L2</li>
 						<li>Spend some time on timing, we’ve purposely avoided spending too much time on low level timing – the current FPGA is big and slow, and nets that cross between dies kind of mess with any hope of representative timing – but it’s worth spending some time to hunt down particularly bad paths, we expect to repipe the final design by a couple of pipe stages to get to the Ghz range so some early warning would be useful</li>
-						<li>B – bit manipulation – coded, not tested</li>
+						<li>B – bit manipulation – tested</li>
+						<li>K – cryptography, both NIST and ShangMi extensions – tested</li>
 						<li>H - Virtualization – about 50% done</li>
 						<li>V - Vector Unit (waiting for FP)</li>
 						<li>Debug</li>
