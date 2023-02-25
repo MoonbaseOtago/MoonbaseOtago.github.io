@@ -10,7 +10,7 @@ this week we found another
 
 ### To recap
 
-One of the fixes we'd found a couple of weeks ago was being able to pull in an extra clock
+One of the fixes we'd found a couple of weeks ago was able to pull in an extra clock
 from the load data path - essentially our commit Q entries predict when an instruction will be completed a
 clock before the data becomes ready, this way the instructions that use that output can be scheduled
 a clock ahead. That bought us a 6% dhrystone performance bump.
