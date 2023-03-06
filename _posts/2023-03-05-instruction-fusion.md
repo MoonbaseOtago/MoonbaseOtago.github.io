@@ -1,6 +1,6 @@
 ---
 layout: post
-title: VRoom! blog - experiments in macro op fusion
+title: VRoom! blog - Experiments in Macro Op Fusion
 ---
 
 ### Introduction
