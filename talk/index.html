@@ -38,7 +38,7 @@
 						<li>2-way simultaneous multithreading capable</li>
 						<li>Multi-core</li>
 						<li>Currently boots Linux on an AWS-FPGA instance</li>
-						<li>Current dhrystone numbers: ~9.12 DMips/MHz - still a work in progress.</li>
+						<li>Current dhrystone numbers: ~9.76 DMips/MHz - still a work in progress.</li>
 						<li>GPL3 – dual licensing possible</li>
 					</ul>
 					</small>
@@ -333,7 +333,7 @@
 					<table>
 					<tr><td>Source</td><td>Dhrystone/sec</td><td>DMips</td><td>DMips/MHz</td></tr>
 					<tr><td>Hardware</td><td>142314</td><td>80.9</td><td>3.23</td></tr>
-					<tr><td>Simulator</td><td>401026</td><td>228.2</td><td>9.12</td></tr>
+					<tr><td>Simulator</td><td>428794</td><td>244.0</td><td>9.76</td></tr>
 					</table>
 					<p>With the BTC largely functional now we can see in architectural traces that we're now predicting all the branches now correctly - the simulator shows that its larger BTC is definitely a plus, it's also now running with the new more parallel load-store units and a combined ALU/branch units - we haven't built an FOGA version yet. Dhystone has been a useful proxy for performance for a while but it's rapidly losing its usefulness.</p>
 					</small>
