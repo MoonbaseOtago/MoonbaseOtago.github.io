@@ -1,6 +1,6 @@
 ---
 layout: post
-title: VRoom! blog - Early Vector Processor Architecture:w
+title: VRoom! blog - Early Vector Processor Architecture
 
 ---
 
@@ -57,7 +57,7 @@ Disadvantages:
 
 ### Design 2 - renamer breaks instructions into beats
 
-In the second design we have the renamer break each vector instruct into multiple beats - issuing cloned
+In the second design we have the renamer break each vector instruction into multiple beats - issuing cloned
 copies of the instruction into the commitQ. This has the
 advantage that they can then be done out of order and spread among multiple vector ALUs and be executed in parallel. 
 
