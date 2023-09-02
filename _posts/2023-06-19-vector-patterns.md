@@ -69,7 +69,7 @@ registers which is always in register V0.
 
 ![placeholder](/public/images/v2.png "masked expansion")
 
-This gives us the general 'shape' of each functional unit - a write port and 4 vector read ports (actually 
+This gives us the general 'shape' for each functional unit - a write port and 4 vector read ports (actually 
 an integer or FP read port too) - there's some scope for simplification of the mask read port - it always
 reads architectural register V0, but still needs to be renamed like any other register.
 
