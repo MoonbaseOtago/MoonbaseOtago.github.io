@@ -4,7 +4,7 @@ title: Contact
 ---
 
 #### Paul Campbell
-* EMail: paul@taniwha.com
+* EMail: taniwha@gmail.com
 * Twitter: MoonbaseOtago
 * Phone (US): (510)652-9396x2
 * Phone (NZ): (03)477-9447x2

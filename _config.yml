@@ -22,7 +22,7 @@ markdown:         kramdown
 highlighter:      rouge
 
 title: VRoom!
-email: paul@taniwha.com
+email: taniwha@gmail.com
 description:  'Very high end RISC-V implementation, cloud server class, out of order, super scalar, speculative, up to 8 IPC'
 tagline:          'Superfast RISC-V'
 baseurl: "/" # the subpath of your site, e.g. /blog
